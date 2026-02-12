@@ -90,7 +90,19 @@ func ParseProfilesINI(iniPath, firefoxDir string) ([]types.Profile, error) {
 		}
 	}
 
-	return profiles, nil
+	// Filter to profiles that have a session file (recovery or previous).
+	var usable []types.Profile
+	for _, p := range profiles {
+		backupDir := filepath.Join(p.Path, "sessionstore-backups")
+		for _, name := range []string{"recovery.jsonlz4", "previous.jsonlz4"} {
+			if _, err := os.Stat(filepath.Join(backupDir, name)); err == nil {
+				usable = append(usable, p)
+				break
+			}
+		}
+	}
+
+	return usable, nil
 }
 
 // DiscoverProfiles finds and parses Firefox profiles on this system.

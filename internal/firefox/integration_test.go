@@ -24,13 +24,13 @@ func TestIntegration_FullPipeline(t *testing.T) {
 					"entries": [{"url": "https://example.com", "title": "Example"}],
 					"index": 1,
 					"lastAccessed": 1000000000000,
-					"group": "g1"
+					"groupId": "g1"
 				},
 				{
 					"entries": [{"url": "https://example.com", "title": "Example Dup"}],
 					"index": 1,
 					"lastAccessed": 1000000000000,
-					"group": "g1"
+					"groupId": "g1"
 				},
 				{
 					"entries": [{"url": "https://other.com/page", "title": "Other"}],

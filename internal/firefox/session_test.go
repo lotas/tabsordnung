@@ -74,7 +74,7 @@ func TestParseSession(t *testing.T) {
 						"index":        1,
 						"lastAccessed": 1707654321000,
 						"image":        "https://example.com/favicon.ico",
-						"group":        "group-1",
+						"groupId":      "group-1",
 					},
 					{
 						"entries": []map[string]interface{}{

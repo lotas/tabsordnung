@@ -55,7 +55,7 @@ type rawTab struct {
 	Index        int        `json:"index"`
 	LastAccessed int64      `json:"lastAccessed"`
 	Image        string     `json:"image"`
-	Group        string     `json:"group"`
+	Group        string     `json:"groupId"`
 }
 
 type rawGroup struct {
@@ -153,11 +153,19 @@ func ParseSession(data []byte) (*types.SessionData, error) {
 }
 
 // ReadSessionFile reads and parses a Firefox session recovery file from the given profile directory.
+// It tries recovery.jsonlz4 first (active session), then previous.jsonlz4 (last closed session).
 func ReadSessionFile(profileDir string) (*types.SessionData, error) {
-	path := filepath.Join(profileDir, "sessionstore-backups", "recovery.jsonlz4")
-	data, err := os.ReadFile(path)
+	backupDir := filepath.Join(profileDir, "sessionstore-backups")
+	var data []byte
+	var err error
+	for _, name := range []string{"recovery.jsonlz4", "previous.jsonlz4"} {
+		data, err = os.ReadFile(filepath.Join(backupDir, name))
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("read session file: %w", err)
+		return nil, fmt.Errorf("no session file found in %s", backupDir)
 	}
 
 	decompressed, err := DecompressMozLz4(data)
