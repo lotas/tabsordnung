@@ -1,0 +1,192 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/nickel-chromium/tabsordnung/internal/types"
+)
+
+// TreeNode represents a visible row in the tree.
+type TreeNode struct {
+	Group *types.TabGroup // non-nil for group headers
+	Tab   *types.Tab      // non-nil for tab rows
+}
+
+// TreeModel manages the collapsible tree view.
+type TreeModel struct {
+	Groups   []*types.TabGroup
+	Expanded map[string]bool // group ID -> expanded
+	Cursor   int
+	Offset   int // scroll offset
+	Width    int
+	Height   int
+	Filter   types.FilterMode
+}
+
+func NewTreeModel(groups []*types.TabGroup) TreeModel {
+	expanded := make(map[string]bool)
+	for _, g := range groups {
+		expanded[g.ID] = !g.Collapsed
+	}
+	return TreeModel{
+		Groups:   groups,
+		Expanded: expanded,
+	}
+}
+
+// VisibleNodes returns the flat list of currently visible nodes.
+func (m TreeModel) VisibleNodes() []TreeNode {
+	var nodes []TreeNode
+	for _, g := range m.Groups {
+		nodes = append(nodes, TreeNode{Group: g})
+		if m.Expanded[g.ID] {
+			for _, tab := range g.Tabs {
+				if m.matchesFilter(tab) {
+					nodes = append(nodes, TreeNode{Tab: tab})
+				}
+			}
+		}
+	}
+	return nodes
+}
+
+func (m TreeModel) matchesFilter(tab *types.Tab) bool {
+	switch m.Filter {
+	case types.FilterStale:
+		return tab.IsStale
+	case types.FilterDead:
+		return tab.IsDead
+	case types.FilterDuplicate:
+		return tab.IsDuplicate
+	default:
+		return true
+	}
+}
+
+// SelectedNode returns the currently selected node, or nil.
+func (m TreeModel) SelectedNode() *TreeNode {
+	nodes := m.VisibleNodes()
+	if m.Cursor >= 0 && m.Cursor < len(nodes) {
+		return &nodes[m.Cursor]
+	}
+	return nil
+}
+
+// MoveUp moves the cursor up.
+func (m *TreeModel) MoveUp() {
+	if m.Cursor > 0 {
+		m.Cursor--
+	}
+	if m.Cursor < m.Offset {
+		m.Offset = m.Cursor
+	}
+}
+
+// MoveDown moves the cursor down.
+func (m *TreeModel) MoveDown() {
+	nodes := m.VisibleNodes()
+	if m.Cursor < len(nodes)-1 {
+		m.Cursor++
+	}
+	visibleRows := m.Height - 2 // account for padding
+	if visibleRows < 1 {
+		visibleRows = 1
+	}
+	if m.Cursor >= m.Offset+visibleRows {
+		m.Offset = m.Cursor - visibleRows + 1
+	}
+}
+
+// Toggle expands/collapses the selected group.
+func (m *TreeModel) Toggle() {
+	node := m.SelectedNode()
+	if node == nil || node.Group == nil {
+		return
+	}
+	m.Expanded[node.Group.ID] = !m.Expanded[node.Group.ID]
+}
+
+// View renders the tree.
+func (m TreeModel) View() string {
+	nodes := m.VisibleNodes()
+	if len(nodes) == 0 {
+		return "No tabs found."
+	}
+
+	visibleRows := m.Height
+	if visibleRows < 1 {
+		visibleRows = 20
+	}
+
+	var b strings.Builder
+	end := m.Offset + visibleRows
+	if end > len(nodes) {
+		end = len(nodes)
+	}
+
+	cursorStyle := lipgloss.NewStyle().Bold(true).Reverse(true)
+	staleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))  // orange
+	deadStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))   // red
+	dupStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33"))     // blue
+	groupStyle := lipgloss.NewStyle().Bold(true)
+
+	for i := m.Offset; i < end; i++ {
+		node := nodes[i]
+		var line string
+
+		if node.Group != nil {
+			icon := "▶"
+			if m.Expanded[node.Group.ID] {
+				icon = "▼"
+			}
+			label := fmt.Sprintf("%s %s (%d tabs)", icon, node.Group.Name, len(node.Group.Tabs))
+			line = groupStyle.Render(label)
+		} else if node.Tab != nil {
+			prefix := "  "
+			var markers []string
+			if node.Tab.IsDead {
+				markers = append(markers, deadStyle.Render("●"))
+			}
+			if node.Tab.IsStale {
+				markers = append(markers, staleStyle.Render("◷"))
+			}
+			if node.Tab.IsDuplicate {
+				markers = append(markers, dupStyle.Render("⇄"))
+			}
+
+			marker := ""
+			if len(markers) > 0 {
+				marker = strings.Join(markers, "") + " "
+			}
+
+			// Truncate URL to fit width
+			maxURLLen := m.Width - len(prefix) - len(marker) - 2
+			if maxURLLen < 10 {
+				maxURLLen = 10
+			}
+			url := node.Tab.URL
+			if len(url) > maxURLLen {
+				url = url[:maxURLLen-1] + "…"
+			}
+			line = prefix + marker + url
+		}
+
+		// Apply cursor highlight
+		if i == m.Cursor {
+			// Pad to full width for highlight
+			for len(line) < m.Width {
+				line += " "
+			}
+			line = cursorStyle.Render(line)
+		}
+
+		b.WriteString(line)
+		if i < end-1 {
+			b.WriteString("\n")
+		}
+	}
+
+	return b.String()
+}
