@@ -127,7 +127,12 @@ async function handleCommand(msg) {
         break;
       case "create-group":
         if (browser.tabs.group) {
-          const groupId = await chrome.tabs.group({ tabIds: [] });
+          const tabIds = msg.tabIds || [];
+          if (tabIds.length === 0) {
+            send({ id: msg.id, ok: true, groupId: -1 });
+            return;
+          }
+          const groupId = await chrome.tabs.group({ tabIds });
           await chrome.tabGroups.update(groupId, {
             title: msg.name || "",
             color: msg.color || "blue",

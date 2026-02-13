@@ -185,17 +185,28 @@ func Apply(r *Result, port int) error {
 		httpSrv.ListenAndServe()
 	}()
 
-	// Wait for extension to connect
+	// Wait for extension to connect and send initial snapshot.
 	fmt.Println("Waiting for extension connection...")
-	timeout := time.After(60 * time.Second)
-	for !srv.Connected() {
-		select {
-		case <-timeout:
-			return fmt.Errorf("timed out waiting for extension connection")
-		case <-time.After(100 * time.Millisecond):
+	var snapshot server.IncomingMsg
+	select {
+	case snapshot = <-srv.Messages():
+		if snapshot.Type != "snapshot" {
+			return fmt.Errorf("expected initial snapshot message, got %q", snapshot.Type)
 		}
+	case <-time.After(60 * time.Second):
+		return fmt.Errorf("timed out waiting for extension connection")
 	}
 	fmt.Println("Extension connected.")
+
+	// Build URL -> browser tab ID mapping from the live snapshot.
+	liveTabs, err := server.ParseSnapshot(snapshot)
+	if err != nil {
+		return fmt.Errorf("parsing extension snapshot: %w", err)
+	}
+	urlToBrowserID := make(map[string]int, len(liveTabs.AllTabs))
+	for _, t := range liveTabs.AllTabs {
+		urlToBrowserID[t.URL] = t.BrowserID
+	}
 
 	categories := []struct {
 		name  Category
@@ -213,52 +224,41 @@ func Apply(r *Result, port int) error {
 			continue
 		}
 
-		// Create tab group
+		// Resolve live browser tab IDs by URL
+		var tabIDs []int
+		for _, m := range cat.moves {
+			if id, ok := urlToBrowserID[m.Tab.URL]; ok {
+				tabIDs = append(tabIDs, id)
+			}
+		}
+
+		// Create tab group with tabs included (Chrome requires at least one tab)
 		groupID := fmt.Sprintf("triage-%d", time.Now().UnixNano())
 		err := srv.Send(server.OutgoingMsg{
 			ID:     groupID,
-			Action: "createGroup",
+			Action: "create-group",
 			Name:   string(cat.name),
 			Color:  cat.color,
+			TabIDs: tabIDs,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create group %s: %w", cat.name, err)
 		}
 
 		// Wait for group creation response
-		var createdGroupID int
 		respTimeout := time.After(10 * time.Second)
 	waitGroup:
 		for {
 			select {
 			case msg := <-srv.Messages():
-				if msg.ID == groupID && msg.GroupID != 0 {
-					createdGroupID = msg.GroupID
+				if msg.ID == groupID {
+					if msg.OK != nil && !*msg.OK {
+						return fmt.Errorf("failed to create group %s: %s", cat.name, msg.Error)
+					}
 					break waitGroup
 				}
 			case <-respTimeout:
 				return fmt.Errorf("timed out waiting for group creation: %s", cat.name)
-			}
-		}
-
-		// Collect tab IDs for this category
-		var tabIDs []int
-		for _, m := range cat.moves {
-			if m.Tab.BrowserID != 0 {
-				tabIDs = append(tabIDs, m.Tab.BrowserID)
-			}
-		}
-
-		if len(tabIDs) > 0 {
-			moveID := fmt.Sprintf("move-%d", time.Now().UnixNano())
-			err = srv.Send(server.OutgoingMsg{
-				ID:      moveID,
-				Action:  "moveToGroup",
-				TabIDs:  tabIDs,
-				GroupID: createdGroupID,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to move tabs to %s: %w", cat.name, err)
 			}
 		}
 
