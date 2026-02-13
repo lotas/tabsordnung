@@ -18,6 +18,7 @@ type TreeNode struct {
 type TreeModel struct {
 	Groups   []*types.TabGroup
 	Expanded map[string]bool // group ID -> expanded
+	Selected map[int]bool    // BrowserID -> selected
 	Cursor   int
 	Offset   int // scroll offset
 	Width    int
@@ -33,6 +34,7 @@ func NewTreeModel(groups []*types.TabGroup) TreeModel {
 	return TreeModel{
 		Groups:   groups,
 		Expanded: expanded,
+		Selected: make(map[int]bool),
 	}
 }
 
@@ -197,6 +199,9 @@ func (m TreeModel) View() string {
 			line = groupStyle.Render(label)
 		} else if node.Tab != nil {
 			prefix := "  "
+			if m.Selected[node.Tab.BrowserID] {
+				prefix = "\u25b8 "
+			}
 			var markers []string
 			if node.Tab.IsDead {
 				markers = append(markers, deadStyle.Render("●"))

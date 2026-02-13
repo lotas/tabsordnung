@@ -11,6 +11,7 @@ type Tab struct {
 	Favicon      string
 	WindowIndex  int
 	TabIndex     int
+	BrowserID    int // live Firefox tab ID; 0 in offline mode
 
 	// Analyzer findings (populated after analysis)
 	IsStale     bool

@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/nickel-chromium/tabsordnung/internal/firefox"
+	"github.com/nickel-chromium/tabsordnung/internal/server"
 	"github.com/nickel-chromium/tabsordnung/internal/tui"
 	"github.com/nickel-chromium/tabsordnung/internal/types"
 )
@@ -14,6 +15,8 @@ import (
 func main() {
 	profileName := flag.String("profile", "", "Firefox profile name (skip picker)")
 	staleDays := flag.Int("stale-days", 7, "Days before a tab is considered stale")
+	liveMode := flag.Bool("live", false, "Start in live mode (connect to extension)")
+	port := flag.Int("port", 19191, "WebSocket port for live mode")
 	flag.Parse()
 
 	profiles, err := firefox.DiscoverProfiles()
@@ -45,7 +48,11 @@ func main() {
 		profiles = filtered
 	}
 
-	model := tui.NewModel(profiles, *staleDays)
+	// Always create the server — it's cheap (just a struct + channel).
+	// ListenAndServe is only called when the user actually enters live mode.
+	srv := server.New(*port)
+
+	model := tui.NewModel(profiles, *staleDays, *liveMode, srv)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

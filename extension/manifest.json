@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Tabsordnung Companion",
+  "version": "0.1.0",
+  "description": "Connects Firefox tabs to the Tabsordnung TUI",
+  "permissions": ["tabs", "tabGroups"],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src ws://127.0.0.1:*"
+  }
+}
