@@ -20,6 +20,9 @@ func TestAnalyzeStale(t *testing.T) {
 	if tabs[0].IsStale {
 		t.Error("fresh tab should not be stale")
 	}
+	if tabs[0].StaleDays != 0 {
+		t.Errorf("fresh tab should have StaleDays 0, got %d", tabs[0].StaleDays)
+	}
 	if !tabs[1].IsStale {
 		t.Error("10-day tab should be stale")
 	}

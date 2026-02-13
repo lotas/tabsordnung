@@ -64,6 +64,9 @@ const (
 	FilterStale
 	FilterDead
 	FilterDuplicate
+	FilterAge7
+	FilterAge30
+	FilterAge90
 )
 
 // SortMode controls tab ordering.

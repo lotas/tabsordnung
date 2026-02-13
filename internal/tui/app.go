@@ -90,8 +90,10 @@ type Model struct {
 	port            int
 	connected       bool
 	selected        map[int]bool // BrowserID -> selected (live mode)
-	groupPicker     GroupPicker
-	showGroupPicker bool
+	groupPicker      GroupPicker
+	showGroupPicker  bool
+	filterPicker     FilterPicker
+	showFilterPicker bool
 }
 
 func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server) Model {
@@ -269,6 +271,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Filter picker mode
+		if m.showFilterPicker {
+			switch msg.String() {
+			case "up", "k":
+				m.filterPicker.MoveUp()
+			case "down", "j":
+				m.filterPicker.MoveDown()
+			case "enter":
+				m.tree.SetFilter(m.filterPicker.Selected().Mode)
+				m.showFilterPicker = false
+			case "esc":
+				m.showFilterPicker = false
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+
 		// Source picker mode
 		if m.showPicker {
 			switch msg.String() {
@@ -334,7 +354,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "l":
 			m.tree.ExpandOrEnter()
 		case "f":
-			m.tree.SetFilter((m.tree.Filter + 1) % 4)
+			m.showFilterPicker = true
+			m.filterPicker = NewFilterPicker(m.tree.Filter)
+			m.filterPicker.Width = m.width
+			m.filterPicker.Height = m.height
 		case "r":
 			if m.mode == ModeLive {
 				// In live mode, the extension will re-send a snapshot on reconnect.
@@ -605,6 +628,10 @@ func (m Model) View() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.groupPicker.View())
 	}
 
+	if m.showFilterPicker {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.filterPicker.View())
+	}
+
 	if m.err != nil {
 		return fmt.Sprintf("\n  Error: %v\n\n  Press 1-9 to switch source, 'q' to quit.\n", m.err)
 	}
@@ -641,7 +668,7 @@ func (m Model) View() string {
 	topBar := topBarStyle.Render(profileStr + "  " + statsStr)
 
 	// Filter indicator
-	filterNames := []string{"all", "stale", "dead", "duplicate"}
+	filterNames := []string{"all", "stale", "dead", "duplicate", ">7d", ">30d", ">90d"}
 	filterStr := fmt.Sprintf("[filter: %s]", filterNames[m.tree.Filter])
 
 	// Panes

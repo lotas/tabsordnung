@@ -63,6 +63,12 @@ func (m TreeModel) matchesFilter(tab *types.Tab) bool {
 		return tab.IsDead
 	case types.FilterDuplicate:
 		return tab.IsDuplicate
+	case types.FilterAge7:
+		return tab.StaleDays > 7
+	case types.FilterAge30:
+		return tab.StaleDays > 30
+	case types.FilterAge90:
+		return tab.StaleDays > 90
 	default:
 		return true
 	}

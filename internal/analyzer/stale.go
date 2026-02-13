@@ -12,9 +12,9 @@ func AnalyzeStale(tabs []*types.Tab, thresholdDays int) {
 
 	for _, tab := range tabs {
 		age := now.Sub(tab.LastAccessed)
+		tab.StaleDays = int(age.Hours() / 24)
 		if age > threshold {
 			tab.IsStale = true
-			tab.StaleDays = int(age.Hours() / 24)
 		}
 	}
 }
