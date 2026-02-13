@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/nickel-chromium/tabsordnung/internal/export"
 	"github.com/nickel-chromium/tabsordnung/internal/firefox"
 	"github.com/nickel-chromium/tabsordnung/internal/server"
 	"github.com/nickel-chromium/tabsordnung/internal/tui"
@@ -17,6 +20,9 @@ func main() {
 	staleDays := flag.Int("stale-days", 7, "Days before a tab is considered stale")
 	liveMode := flag.Bool("live", false, "Start in live mode (connect to extension)")
 	port := flag.Int("port", 19191, "WebSocket port for live mode")
+	exportMode := flag.Bool("export", false, "Export tabs as markdown and exit")
+	outFile := flag.String("out", "", "Output file path (default: stdout)")
+	listProfiles := flag.Bool("list-profiles", false, "List Firefox profiles and exit")
 	flag.Parse()
 
 	profiles, err := firefox.DiscoverProfiles()
@@ -27,6 +33,17 @@ func main() {
 	if len(profiles) == 0 {
 		fmt.Fprintln(os.Stderr, "No Firefox profiles found.")
 		os.Exit(1)
+	}
+
+	if *listProfiles {
+		for _, p := range profiles {
+			suffix := ""
+			if p.IsDefault {
+				suffix = " [default]"
+			}
+			fmt.Printf("%s (%s)%s\n", p.Name, p.Path, suffix)
+		}
+		return
 	}
 
 	// If --profile flag is set, filter to just that profile
@@ -48,6 +65,35 @@ func main() {
 		profiles = filtered
 	}
 
+	if *exportMode {
+		var data *types.SessionData
+
+		if *liveMode {
+			data, err = exportLive(*port)
+		} else {
+			profile := profiles[0]
+			data, err = firefox.ReadSessionFile(profile.Path)
+			if err == nil {
+				data.Profile = profile
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		md := export.Markdown(data)
+		if *outFile != "" {
+			if err := os.WriteFile(*outFile, []byte(md), 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing file: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Print(md)
+		}
+		return
+	}
+
 	// Always create the server — it's cheap (just a struct + channel).
 	// ListenAndServe is only called when the user actually enters live mode.
 	srv := server.New(*port)
@@ -58,5 +104,27 @@ func main() {
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func exportLive(port int) (*types.SessionData, error) {
+	srv := server.New(port)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.ListenAndServe(ctx)
+
+	fmt.Fprintf(os.Stderr, "Waiting for Firefox extension on port %d...\n", port)
+
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case msg := <-srv.Messages():
+			if msg.Type == "snapshot" {
+				return server.ParseSnapshot(msg)
+			}
+		case <-timeout:
+			return nil, fmt.Errorf("timed out waiting for extension (10s)")
+		}
 	}
 }
