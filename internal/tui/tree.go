@@ -16,14 +16,15 @@ type TreeNode struct {
 
 // TreeModel manages the collapsible tree view.
 type TreeModel struct {
-	Groups   []*types.TabGroup
-	Expanded map[string]bool // group ID -> expanded
-	Selected map[int]bool    // BrowserID -> selected
-	Cursor   int
-	Offset   int // scroll offset
-	Width    int
-	Height   int
-	Filter   types.FilterMode
+	Groups        []*types.TabGroup
+	Expanded      map[string]bool // group ID -> expanded
+	SavedExpanded map[string]bool // snapshot before filter override
+	Selected      map[int]bool    // BrowserID -> selected
+	Cursor        int
+	Offset        int // scroll offset
+	Width         int
+	Height        int
+	Filter        types.FilterMode
 }
 
 func NewTreeModel(groups []*types.TabGroup) TreeModel {
@@ -65,6 +66,35 @@ func (m TreeModel) matchesFilter(tab *types.Tab) bool {
 	default:
 		return true
 	}
+}
+
+// SetFilter changes the active filter and manages expanded-state save/restore.
+func (m *TreeModel) SetFilter(f types.FilterMode) {
+	prevFilter := m.Filter
+	m.Filter = f
+
+	if f != types.FilterAll {
+		if prevFilter == types.FilterAll {
+			// Save current expanded state before overriding.
+			m.SavedExpanded = make(map[string]bool, len(m.Expanded))
+			for id, exp := range m.Expanded {
+				m.SavedExpanded[id] = exp
+			}
+		}
+		// Force all groups expanded.
+		for _, g := range m.Groups {
+			m.Expanded[g.ID] = true
+		}
+	} else if m.SavedExpanded != nil {
+		// Restore saved state when switching back to "all".
+		for id, exp := range m.SavedExpanded {
+			m.Expanded[id] = exp
+		}
+		m.SavedExpanded = nil
+	}
+
+	m.Cursor = 0
+	m.Offset = 0
 }
 
 // SelectedNode returns the currently selected node, or nil.
@@ -195,7 +225,18 @@ func (m TreeModel) View() string {
 			if m.Expanded[node.Group.ID] {
 				icon = "▼"
 			}
-			label := fmt.Sprintf("%s %s (%d tabs)", icon, node.Group.Name, len(node.Group.Tabs))
+			var label string
+			if m.Filter == types.FilterAll {
+				label = fmt.Sprintf("%s %s (%d tabs)", icon, node.Group.Name, len(node.Group.Tabs))
+			} else {
+				matched := 0
+				for _, tab := range node.Group.Tabs {
+					if m.matchesFilter(tab) {
+						matched++
+					}
+				}
+				label = fmt.Sprintf("%s %s (%d/%d tabs)", icon, node.Group.Name, matched, len(node.Group.Tabs))
+			}
 			line = groupStyle.Render(label)
 		} else if node.Tab != nil {
 			prefix := "  "

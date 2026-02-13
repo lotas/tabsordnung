@@ -20,7 +20,8 @@ func main() {
 	staleDays := flag.Int("stale-days", 7, "Days before a tab is considered stale")
 	liveMode := flag.Bool("live", false, "Start in live mode (connect to extension)")
 	port := flag.Int("port", 19191, "WebSocket port for live mode")
-	exportMode := flag.Bool("export", false, "Export tabs as markdown and exit")
+	exportMode := flag.Bool("export", false, "Export tabs and exit")
+	exportFormat := flag.String("format", "markdown", "Export format: markdown or json")
 	outFile := flag.String("out", "", "Output file path (default: stdout)")
 	listProfiles := flag.Bool("list-profiles", false, "List Firefox profiles and exit")
 	flag.Parse()
@@ -82,14 +83,27 @@ func main() {
 			os.Exit(1)
 		}
 
-		md := export.Markdown(data)
+		var output string
+		switch *exportFormat {
+		case "json":
+			output, err = export.JSON(data)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error generating JSON: %v\n", err)
+				os.Exit(1)
+			}
+		case "markdown", "md":
+			output = export.Markdown(data)
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown format %q. Use 'markdown' or 'json'.\n", *exportFormat)
+			os.Exit(1)
+		}
 		if *outFile != "" {
-			if err := os.WriteFile(*outFile, []byte(md), 0644); err != nil {
+			if err := os.WriteFile(*outFile, []byte(output), 0644); err != nil {
 				fmt.Fprintf(os.Stderr, "Error writing file: %v\n", err)
 				os.Exit(1)
 			}
 		} else {
-			fmt.Print(md)
+			fmt.Print(output)
 		}
 		return
 	}

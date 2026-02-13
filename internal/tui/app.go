@@ -334,9 +334,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "l":
 			m.tree.ExpandOrEnter()
 		case "f":
-			m.tree.Filter = (m.tree.Filter + 1) % 4
-			m.tree.Cursor = 0
-			m.tree.Offset = 0
+			m.tree.SetFilter((m.tree.Filter + 1) % 4)
 		case "r":
 			if m.mode == ModeLive {
 				// In live mode, the extension will re-send a snapshot on reconnect.
@@ -493,15 +491,28 @@ func (m *Model) rebuildTree() {
 	oldCursor := m.tree.Cursor
 	oldOffset := m.tree.Offset
 	oldExpanded := m.tree.Expanded
+	oldFilter := m.tree.Filter
+	oldSavedExpanded := m.tree.SavedExpanded
 
 	m.tree = NewTreeModel(m.session.Groups)
 	m.tree.Width = m.width * 60 / 100
 	m.tree.Height = m.height - 5
+	m.tree.Filter = oldFilter
+	m.tree.SavedExpanded = oldSavedExpanded
 
 	// Restore expanded state from before rebuild
 	if oldExpanded != nil {
 		for id, exp := range oldExpanded {
 			m.tree.Expanded[id] = exp
+		}
+	}
+
+	// Expand any new groups when a filter is active
+	if m.tree.Filter != types.FilterAll {
+		for _, g := range m.session.Groups {
+			if _, exists := oldExpanded[g.ID]; !exists {
+				m.tree.Expanded[g.ID] = true
+			}
 		}
 	}
 
