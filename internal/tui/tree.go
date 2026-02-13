@@ -108,6 +108,58 @@ func (m *TreeModel) Toggle() {
 	m.Expanded[node.Group.ID] = !m.Expanded[node.Group.ID]
 }
 
+// CollapseOrParent collapses the selected group if expanded, or jumps to the
+// parent group header if the cursor is on a tab.
+func (m *TreeModel) CollapseOrParent() {
+	node := m.SelectedNode()
+	if node == nil {
+		return
+	}
+	if node.Group != nil {
+		// On a group header: collapse it if expanded.
+		if m.Expanded[node.Group.ID] {
+			m.Expanded[node.Group.ID] = false
+		}
+		return
+	}
+	// On a tab: jump to the parent group header.
+	nodes := m.VisibleNodes()
+	for i := m.Cursor - 1; i >= 0; i-- {
+		if nodes[i].Group != nil {
+			m.Cursor = i
+			if m.Cursor < m.Offset {
+				m.Offset = m.Cursor
+			}
+			return
+		}
+	}
+}
+
+// ExpandOrEnter expands the selected group if collapsed, or moves into the
+// first child tab if already expanded.
+func (m *TreeModel) ExpandOrEnter() {
+	node := m.SelectedNode()
+	if node == nil || node.Group == nil {
+		return
+	}
+	if !m.Expanded[node.Group.ID] {
+		m.Expanded[node.Group.ID] = true
+		return
+	}
+	// Already expanded: move to first child tab.
+	nodes := m.VisibleNodes()
+	if m.Cursor+1 < len(nodes) && nodes[m.Cursor+1].Tab != nil {
+		m.Cursor++
+		visibleRows := m.Height - 2
+		if visibleRows < 1 {
+			visibleRows = 1
+		}
+		if m.Cursor >= m.Offset+visibleRows {
+			m.Offset = m.Cursor - visibleRows + 1
+		}
+	}
+}
+
 // View renders the tree.
 func (m TreeModel) View() string {
 	nodes := m.VisibleNodes()

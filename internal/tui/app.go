@@ -143,6 +143,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tree.MoveDown()
 		case "enter":
 			m.tree.Toggle()
+		case "h":
+			m.tree.CollapseOrParent()
+		case "l":
+			m.tree.ExpandOrEnter()
 		case "f":
 			m.tree.Filter = (m.tree.Filter + 1) % 4
 			m.tree.Cursor = 0
@@ -258,7 +262,7 @@ func (m Model) View() string {
 	// Bottom bar
 	bottomBarStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Padding(0, 1)
 	bottomBar := bottomBarStyle.Render(
-		"↑↓/jk navigate · enter expand · f filter · r refresh · p profile · q quit  " + filterStr,
+		"↑↓/jk navigate · h/l collapse/expand · enter toggle · f filter · r refresh · p profile · q quit  " + filterStr,
 	)
 
 	return lipgloss.JoinVertical(lipgloss.Left, topBar, panes, bottomBar)
