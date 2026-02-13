@@ -12,6 +12,7 @@ type Tab struct {
 	WindowIndex  int
 	TabIndex     int
 	BrowserID    int // live Firefox tab ID; 0 in offline mode
+	Pinned       bool
 
 	// Analyzer findings (populated after analysis)
 	IsStale      bool
@@ -20,7 +21,15 @@ type Tab struct {
 	DeadReason   string // e.g. "404", "timeout", "dns"
 	StaleDays    int
 	DuplicateOf  []int  // indices of duplicate tabs
-	GitHubStatus string // "open", "closed", "merged", "" (not a GitHub URL)
+	GitHubStatus string           // "open", "closed", "merged", "" (not a GitHub URL)
+	GitHubTriage *GitHubTriageInfo // populated by triage analyzer; nil if not a GitHub URL
+}
+
+// GitHubTriageInfo holds extended GitHub metadata for triage classification.
+type GitHubTriageInfo struct {
+	ReviewRequested bool      // current user is a requested reviewer
+	Assigned        bool      // current user is an assignee
+	UpdatedAt       time.Time // last update time on GitHub
 }
 
 // TabGroup represents a Firefox tab group.

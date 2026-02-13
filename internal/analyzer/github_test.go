@@ -120,6 +120,20 @@ func TestBuildGraphQLQuery(t *testing.T) {
 	}
 }
 
+func TestBuildTriageGraphQLQuery(t *testing.T) {
+	refs := []*githubRef{
+		{Owner: "org", Repo: "repo", Kind: "issue", Number: 42},
+		{Owner: "org", Repo: "repo", Kind: "pr", Number: 99},
+	}
+	query, _ := buildTriageGraphQLQuery(refs)
+	if !containsAll(query, "assignees", "updatedAt") {
+		t.Errorf("query missing triage fields: %s", query)
+	}
+	if !containsAll(query, "reviewRequests") {
+		t.Errorf("query missing reviewRequests: %s", query)
+	}
+}
+
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if !contains(s, sub) {

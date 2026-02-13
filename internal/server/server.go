@@ -20,18 +20,28 @@ type IncomingMsg struct {
 	TabID  int             `json:"tabId,omitempty"`
 	Group  json.RawMessage `json:"group,omitempty"`
 	// Command response fields
-	ID    string `json:"id,omitempty"`
-	OK    *bool  `json:"ok,omitempty"`
-	Error string `json:"error,omitempty"`
+	ID      string `json:"id,omitempty"`
+	OK      *bool  `json:"ok,omitempty"`
+	Error   string `json:"error,omitempty"`
+	GroupID int    `json:"groupId,omitempty"`
+}
+
+// TabToOpen specifies a tab to create in the browser.
+type TabToOpen struct {
+	URL    string `json:"url"`
+	Pinned bool   `json:"pinned,omitempty"`
 }
 
 // OutgoingMsg is a command from the TUI to the extension.
 type OutgoingMsg struct {
-	ID      string `json:"id"`
-	Action  string `json:"action"`
-	TabID   int    `json:"tabId,omitempty"`
-	TabIDs  []int  `json:"tabIds,omitempty"`
-	GroupID int    `json:"groupId,omitempty"`
+	ID      string      `json:"id"`
+	Action  string      `json:"action"`
+	TabID   int         `json:"tabId,omitempty"`
+	TabIDs  []int       `json:"tabIds,omitempty"`
+	GroupID int         `json:"groupId,omitempty"`
+	Tabs    []TabToOpen `json:"tabs,omitempty"`
+	Name    string      `json:"name,omitempty"`
+	Color   string      `json:"color,omitempty"`
 }
 
 // Server manages the WebSocket connection to the extension.

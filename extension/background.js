@@ -117,6 +117,27 @@ async function handleCommand(msg) {
           await browser.tabs.group({ tabIds: msg.tabIds, groupId: msg.groupId });
         }
         break;
+      case "open":
+        for (const tab of (msg.tabs || [])) {
+          await browser.tabs.create({
+            url: tab.url,
+            pinned: tab.pinned || false,
+          });
+        }
+        break;
+      case "create-group":
+        if (browser.tabs.group) {
+          const groupId = await chrome.tabs.group({ tabIds: [] });
+          await chrome.tabGroups.update(groupId, {
+            title: msg.name || "",
+            color: msg.color || "blue",
+          });
+          send({ id: msg.id, ok: true, groupId });
+          return;
+        }
+        // Firefox doesn't have native tab groups API yet
+        send({ id: msg.id, ok: true, groupId: -1 });
+        return;
       default:
         send({ id: msg.id, ok: false, error: `unknown action: ${msg.action}` });
         return;
