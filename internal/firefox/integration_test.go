@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nickel-chromium/tabsordnung/internal/analyzer"
+	"github.com/lotas/tabsordnung/internal/analyzer"
 	"github.com/pierrec/lz4/v4"
 )
 

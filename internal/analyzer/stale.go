@@ -3,7 +3,7 @@ package analyzer
 import (
 	"time"
 
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 func AnalyzeStale(tabs []*types.Tab, thresholdDays int) {

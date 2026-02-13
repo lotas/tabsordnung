@@ -3,7 +3,7 @@ package analyzer
 import (
 	"testing"
 
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 func TestAnalyzeDuplicates(t *testing.T) {

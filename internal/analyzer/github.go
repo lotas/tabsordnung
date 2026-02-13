@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 var githubURLPattern = regexp.MustCompile(`^https?://github\.com/([^/]+)/([^/]+)/(issues|pull)/(\d+)`)

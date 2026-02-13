@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 func TestAnalyzeDeadLinks(t *testing.T) {

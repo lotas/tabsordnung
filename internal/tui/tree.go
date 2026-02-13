@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 // TreeNode represents a visible row in the tree.

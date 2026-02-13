@@ -7,9 +7,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/nickel-chromium/tabsordnung/internal/server"
-	"github.com/nickel-chromium/tabsordnung/internal/storage"
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/server"
+	"github.com/lotas/tabsordnung/internal/storage"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 // Create converts a SessionData into storage types and persists a snapshot.

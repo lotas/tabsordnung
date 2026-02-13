@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nickel-chromium/tabsordnung/internal/storage"
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/storage"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 // DiffEntry represents a single tab in a diff result.

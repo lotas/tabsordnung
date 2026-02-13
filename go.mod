@@ -1,4 +1,4 @@
-module github.com/nickel-chromium/tabsordnung
+module github.com/lotas/tabsordnung
 
 go 1.24.2
 

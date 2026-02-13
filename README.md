@@ -16,8 +16,12 @@ Tabs are displayed in a collapsible tree grouped by Firefox tab groups.
 ## Install
 
 ```
-go install github.com/nickel-chromium/tabsordnung@latest
+go install github.com/lotas/tabsordnung@latest
 ```
+
+## Disclaimer
+
+This project is provided as-is. It works for the use cases covered by current tests and development workflows, but it is not guaranteed to handle every Firefox/session scenario.
 
 ## Usage
 
@@ -82,6 +86,17 @@ tabsordnung triage [--profile name] [--apply] [--port N]
 ```
 
 Dry-run by default -- shows proposed moves and asks for confirmation. Use `--apply` to skip confirmation (for automation). Requires `gh auth login` or `GITHUB_TOKEN` environment variable.
+
+## Install local extension
+
+To use live mode, load the extension from this repository into Firefox:
+
+1. Open Firefox and go to `about:debugging#/runtime/this-firefox`.
+2. Click **Load Temporary Add-on...**.
+3. Select `extension/manifest.json` from this repo.
+4. Start tabsordnung with live mode enabled: `tabsordnung --live` (or `tabsordnung --live --port 19191`).
+
+Note: this is a temporary add-on install for local development/testing.
 
 ## Keys
 

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 func TestAnalyzeStale(t *testing.T) {

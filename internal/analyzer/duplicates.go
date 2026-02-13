@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 func NormalizeURL(rawURL string) string {

@@ -8,10 +8,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/nickel-chromium/tabsordnung/internal/analyzer"
-	"github.com/nickel-chromium/tabsordnung/internal/firefox"
-	"github.com/nickel-chromium/tabsordnung/internal/server"
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/analyzer"
+	"github.com/lotas/tabsordnung/internal/firefox"
+	"github.com/lotas/tabsordnung/internal/server"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 // --- Messages ---

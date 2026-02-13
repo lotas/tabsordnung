@@ -1,6 +1,6 @@
 package analyzer
 
-import "github.com/nickel-chromium/tabsordnung/internal/types"
+import "github.com/lotas/tabsordnung/internal/types"
 
 func ComputeStats(data *types.SessionData) types.Stats {
 	stats := types.Stats{

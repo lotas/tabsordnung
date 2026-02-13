@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nickel-chromium/tabsordnung/internal/server"
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/server"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 // Category represents a triage bucket for GitHub tabs.

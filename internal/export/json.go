@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 type jsonExport struct {

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nickel-chromium/tabsordnung/internal/storage"
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/storage"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 // testDB creates a temporary SQLite database for testing.

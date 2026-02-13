@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 // Markdown formats session data as a markdown document.

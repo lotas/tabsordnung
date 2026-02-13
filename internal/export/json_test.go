@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 func TestJSON_GroupedAndUngrouped(t *testing.T) {

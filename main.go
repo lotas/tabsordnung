@@ -11,15 +11,15 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/nickel-chromium/tabsordnung/internal/analyzer"
-	"github.com/nickel-chromium/tabsordnung/internal/export"
-	"github.com/nickel-chromium/tabsordnung/internal/firefox"
-	"github.com/nickel-chromium/tabsordnung/internal/server"
-	"github.com/nickel-chromium/tabsordnung/internal/snapshot"
-	"github.com/nickel-chromium/tabsordnung/internal/storage"
-	"github.com/nickel-chromium/tabsordnung/internal/triage"
-	"github.com/nickel-chromium/tabsordnung/internal/tui"
-	"github.com/nickel-chromium/tabsordnung/internal/types"
+	"github.com/lotas/tabsordnung/internal/analyzer"
+	"github.com/lotas/tabsordnung/internal/export"
+	"github.com/lotas/tabsordnung/internal/firefox"
+	"github.com/lotas/tabsordnung/internal/server"
+	"github.com/lotas/tabsordnung/internal/snapshot"
+	"github.com/lotas/tabsordnung/internal/storage"
+	"github.com/lotas/tabsordnung/internal/triage"
+	"github.com/lotas/tabsordnung/internal/tui"
+	"github.com/lotas/tabsordnung/internal/types"
 )
 
 func main() {
