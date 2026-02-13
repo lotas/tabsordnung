@@ -22,6 +22,7 @@ type sessionLoadedMsg struct {
 }
 
 type analysisCompleteMsg struct{}
+type githubAnalysisCompleteMsg struct{}
 
 // SourceMode distinguishes live vs offline.
 type SourceMode int
@@ -83,6 +84,8 @@ type Model struct {
 
 	// Dead link checking
 	deadChecking bool
+	// GitHub status checking
+	githubChecking bool
 
 	// Live mode
 	mode            SourceMode
@@ -184,6 +187,13 @@ func runDeadLinkChecks(tabs []*types.Tab) tea.Cmd {
 		for range results {
 		}
 		return analysisCompleteMsg{}
+	}
+}
+
+func runGitHubChecks(tabs []*types.Tab) tea.Cmd {
+	return func() tea.Msg {
+		analyzer.AnalyzeGitHub(tabs)
+		return githubAnalysisCompleteMsg{}
 	}
 }
 
@@ -436,18 +446,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Run synchronous analyzers
 		analyzer.AnalyzeStale(m.session.AllTabs, m.staleDays)
 		analyzer.AnalyzeDuplicates(m.session.AllTabs)
-		analyzer.AnalyzeGitHub(m.session.AllTabs)
 		m.stats = analyzer.ComputeStats(m.session)
 
 		// Set up tree
 		m.rebuildTree()
 
-		// Start dead link checks async
+		// Start async checks
 		m.deadChecking = true
-		return m, runDeadLinkChecks(m.session.AllTabs)
+		m.githubChecking = true
+		return m, tea.Batch(
+			runDeadLinkChecks(m.session.AllTabs),
+			runGitHubChecks(m.session.AllTabs),
+		)
 
 	case analysisCompleteMsg:
 		m.deadChecking = false
+		m.stats = analyzer.ComputeStats(m.session)
+		return m, nil
+
+	case githubAnalysisCompleteMsg:
+		m.githubChecking = false
 		m.stats = analyzer.ComputeStats(m.session)
 		return m, nil
 
@@ -458,14 +476,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		analyzer.AnalyzeStale(m.session.AllTabs, m.staleDays)
 		analyzer.AnalyzeDuplicates(m.session.AllTabs)
-		analyzer.AnalyzeGitHub(m.session.AllTabs)
 		m.stats = analyzer.ComputeStats(m.session)
 
 		m.rebuildTree()
 
 		m.deadChecking = true
+		m.githubChecking = true
 		return m, tea.Batch(
 			runDeadLinkChecks(m.session.AllTabs),
+			runGitHubChecks(m.session.AllTabs),
 			listenWebSocket(m.server),
 		)
 
@@ -669,6 +688,9 @@ func (m Model) View() string {
 	}
 	if m.deadChecking {
 		statsStr += " · checking links..."
+	}
+	if m.githubChecking {
+		statsStr += " · checking github..."
 	}
 	topBar := topBarStyle.Render(profileStr + "  " + statsStr)
 
