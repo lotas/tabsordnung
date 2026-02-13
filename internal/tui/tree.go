@@ -69,6 +69,8 @@ func (m TreeModel) matchesFilter(tab *types.Tab) bool {
 		return tab.StaleDays > 30
 	case types.FilterAge90:
 		return tab.StaleDays > 90
+	case types.FilterGitHubDone:
+		return tab.GitHubStatus == "closed" || tab.GitHubStatus == "merged"
 	default:
 		return true
 	}
@@ -220,6 +222,8 @@ func (m TreeModel) View() string {
 	staleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))  // orange
 	deadStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))   // red
 	dupStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33"))     // blue
+	ghDoneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))  // green
+	ghOpenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("135")) // purple
 	groupStyle := lipgloss.NewStyle().Bold(true)
 
 	for i := m.Offset; i < end; i++ {
@@ -258,6 +262,11 @@ func (m TreeModel) View() string {
 			}
 			if node.Tab.IsDuplicate {
 				markers = append(markers, dupStyle.Render("⇄"))
+			}
+			if node.Tab.GitHubStatus == "closed" || node.Tab.GitHubStatus == "merged" {
+				markers = append(markers, ghDoneStyle.Render("✓"))
+			} else if node.Tab.GitHubStatus == "open" {
+				markers = append(markers, ghOpenStyle.Render("○"))
 			}
 
 			marker := ""

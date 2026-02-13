@@ -436,6 +436,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Run synchronous analyzers
 		analyzer.AnalyzeStale(m.session.AllTabs, m.staleDays)
 		analyzer.AnalyzeDuplicates(m.session.AllTabs)
+		analyzer.AnalyzeGitHub(m.session.AllTabs)
 		m.stats = analyzer.ComputeStats(m.session)
 
 		// Set up tree
@@ -457,6 +458,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		analyzer.AnalyzeStale(m.session.AllTabs, m.staleDays)
 		analyzer.AnalyzeDuplicates(m.session.AllTabs)
+		analyzer.AnalyzeGitHub(m.session.AllTabs)
 		m.stats = analyzer.ComputeStats(m.session)
 
 		m.rebuildTree()
@@ -662,13 +664,16 @@ func (m Model) View() string {
 	if m.stats.DuplicateTabs > 0 {
 		statsStr += fmt.Sprintf(" · %d dup", m.stats.DuplicateTabs)
 	}
+	if m.stats.GitHubDoneTabs > 0 {
+		statsStr += fmt.Sprintf(" · %d done", m.stats.GitHubDoneTabs)
+	}
 	if m.deadChecking {
 		statsStr += " · checking links..."
 	}
 	topBar := topBarStyle.Render(profileStr + "  " + statsStr)
 
 	// Filter indicator
-	filterNames := []string{"all", "stale", "dead", "duplicate", ">7d", ">30d", ">90d"}
+	filterNames := []string{"all", "stale", "dead", "duplicate", ">7d", ">30d", ">90d", "gh done"}
 	filterStr := fmt.Sprintf("[filter: %s]", filterNames[m.tree.Filter])
 
 	// Panes

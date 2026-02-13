@@ -72,6 +72,15 @@ func (m DetailModel) ViewTab(tab *types.Tab) string {
 			Foreground(lipgloss.Color("33")).Bold(true).
 			Render(fmt.Sprintf("Duplicate (%d copies)", len(tab.DuplicateOf)+1)))
 	}
+	if tab.GitHubStatus == "closed" || tab.GitHubStatus == "merged" {
+		statuses = append(statuses, lipgloss.NewStyle().
+			Foreground(lipgloss.Color("42")).Bold(true).
+			Render(fmt.Sprintf("GitHub: %s", tab.GitHubStatus)))
+	} else if tab.GitHubStatus == "open" {
+		statuses = append(statuses, lipgloss.NewStyle().
+			Foreground(lipgloss.Color("135")).Bold(true).
+			Render("GitHub: open"))
+	}
 
 	if len(statuses) > 0 {
 		b.WriteString(labelStyle.Render("Status") + "\n")

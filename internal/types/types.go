@@ -14,12 +14,13 @@ type Tab struct {
 	BrowserID    int // live Firefox tab ID; 0 in offline mode
 
 	// Analyzer findings (populated after analysis)
-	IsStale     bool
-	IsDead      bool
-	IsDuplicate bool
-	DeadReason  string // e.g. "404", "timeout", "dns"
-	StaleDays   int
-	DuplicateOf []int // indices of duplicate tabs
+	IsStale      bool
+	IsDead       bool
+	IsDuplicate  bool
+	DeadReason   string // e.g. "404", "timeout", "dns"
+	StaleDays    int
+	DuplicateOf  []int  // indices of duplicate tabs
+	GitHubStatus string // "open", "closed", "merged", "" (not a GitHub URL)
 }
 
 // TabGroup represents a Firefox tab group.
@@ -49,11 +50,12 @@ type SessionData struct {
 
 // Stats holds aggregate statistics.
 type Stats struct {
-	TotalTabs     int
-	TotalGroups   int
-	StaleTabs     int
-	DeadTabs      int
-	DuplicateTabs int
+	TotalTabs      int
+	TotalGroups    int
+	StaleTabs      int
+	DeadTabs       int
+	DuplicateTabs  int
+	GitHubDoneTabs int
 }
 
 // FilterMode controls which tabs are shown.
@@ -67,6 +69,7 @@ const (
 	FilterAge7
 	FilterAge30
 	FilterAge90
+	FilterGitHubDone
 )
 
 // SortMode controls tab ordering.

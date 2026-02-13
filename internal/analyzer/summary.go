@@ -17,6 +17,9 @@ func ComputeStats(data *types.SessionData) types.Stats {
 		if tab.IsDuplicate {
 			stats.DuplicateTabs++
 		}
+		if tab.GitHubStatus == "closed" || tab.GitHubStatus == "merged" {
+			stats.GitHubDoneTabs++
+		}
 	}
 	return stats
 }
