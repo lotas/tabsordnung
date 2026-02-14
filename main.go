@@ -14,9 +14,12 @@ import (
 	"github.com/lotas/tabsordnung/internal/analyzer"
 	"github.com/lotas/tabsordnung/internal/export"
 	"github.com/lotas/tabsordnung/internal/firefox"
+	"path/filepath"
+
 	"github.com/lotas/tabsordnung/internal/server"
 	"github.com/lotas/tabsordnung/internal/snapshot"
 	"github.com/lotas/tabsordnung/internal/storage"
+	"github.com/lotas/tabsordnung/internal/summarize"
 	"github.com/lotas/tabsordnung/internal/triage"
 	"github.com/lotas/tabsordnung/internal/tui"
 	"github.com/lotas/tabsordnung/internal/types"
@@ -33,6 +36,9 @@ func main() {
 			return
 		case "export":
 			runExport(os.Args[2:])
+			return
+		case "summarize":
+			runSummarize(os.Args[2:])
 			return
 		case "profiles":
 			runProfiles()
@@ -123,8 +129,16 @@ Usage:
     --apply                Apply moves without confirmation
     --port <n>             WebSocket port for live mode (default: 19191)
 
+  tabsordnung summarize                                  Summarize tabs via Ollama
+    --profile <name>       Firefox profile name
+    --model <name>         Ollama model (env: TABSORDNUNG_MODEL, default: llama3.2)
+    --out-dir <path>       Output directory (default: ~/.local/share/tabsordnung/summaries/)
+    --group <name>         Tab group to summarize (default: "Summarize This")
+
 Environment:
   TABSORDNUNG_PROFILE    Default Firefox profile (overridden by --profile flag)
+  TABSORDNUNG_MODEL      Default Ollama model (overridden by --model flag)
+  OLLAMA_HOST            Ollama server URL (default: http://localhost:11434)
 `)
 }
 
@@ -506,6 +520,60 @@ func runTriage(args []string) {
 
 	if err := triage.Apply(result, *port); err != nil {
 		fmt.Fprintf(os.Stderr, "Error applying triage: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runSummarize(args []string) {
+	fs := flag.NewFlagSet("summarize", flag.ExitOnError)
+	profileName := fs.String("profile", "", "Firefox profile name")
+	model := fs.String("model", "", "Ollama model name (default: llama3.2)")
+	outDir := fs.String("out-dir", "", "Output directory for summary files")
+	groupName := fs.String("group", "Summarize This", "Tab group name to summarize")
+	fs.Parse(args)
+
+	session, err := resolveSession(resolveProfileName(*profileName))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Resolve model: flag > env > default.
+	resolvedModel := *model
+	if resolvedModel == "" {
+		resolvedModel = os.Getenv("TABSORDNUNG_MODEL")
+	}
+	if resolvedModel == "" {
+		resolvedModel = "llama3.2"
+	}
+
+	// Resolve Ollama host: env > default.
+	ollamaHost := os.Getenv("OLLAMA_HOST")
+	if ollamaHost == "" {
+		ollamaHost = "http://localhost:11434"
+	}
+
+	// Resolve output directory: flag > default.
+	resolvedOutDir := *outDir
+	if resolvedOutDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		resolvedOutDir = filepath.Join(home, ".local", "share", "tabsordnung", "summaries")
+	}
+
+	cfg := summarize.Config{
+		OutDir:     resolvedOutDir,
+		Model:      resolvedModel,
+		OllamaHost: ollamaHost,
+		GroupName:  *groupName,
+		Session:    session,
+	}
+
+	if err := summarize.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
