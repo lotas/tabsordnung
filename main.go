@@ -105,7 +105,7 @@ Usage:
 
   tabsordnung export                                   Export tabs to stdout or file
     --profile <name>       Firefox profile name
-    --format <fmt>         Export format: markdown, md, or json (default: markdown)
+    --json                 Export as JSON instead of markdown
     --out <file>           Output file path (default: stdout)
     --live                 Export from live extension instead of session file
     --port <n>             WebSocket port for live mode (default: 19191)
@@ -131,7 +131,7 @@ Environment:
 func runExport(args []string) {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
 	profileName := fs.String("profile", "", "Firefox profile name")
-	format := fs.String("format", "markdown", "Export format: markdown, md, or json")
+	jsonFlag := fs.Bool("json", false, "Export as JSON instead of markdown")
 	outFile := fs.String("out", "", "Output file path (default: stdout)")
 	liveMode := fs.Bool("live", false, "Export from live extension instead of session file")
 	port := fs.Int("port", 19191, "WebSocket port for live mode")
@@ -151,18 +151,14 @@ func runExport(args []string) {
 	}
 
 	var output string
-	switch *format {
-	case "json":
+	if *jsonFlag {
 		output, err = export.JSON(data)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error generating JSON: %v\n", err)
 			os.Exit(1)
 		}
-	case "markdown", "md":
+	} else {
 		output = export.Markdown(data)
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown format %q. Use 'markdown' or 'json'.\n", *format)
-		os.Exit(1)
 	}
 
 	if *outFile != "" {
