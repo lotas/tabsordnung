@@ -25,6 +25,8 @@ type IncomingMsg struct {
 	Error   string `json:"error,omitempty"`
 	GroupID int    `json:"groupId,omitempty"`
 	Content string `json:"content,omitempty"`
+	Items   string `json:"items,omitempty"`
+	Source  string `json:"source,omitempty"`
 }
 
 // TabToOpen specifies a tab to create in the browser.
@@ -43,6 +45,7 @@ type OutgoingMsg struct {
 	Tabs    []TabToOpen `json:"tabs,omitempty"`
 	Name    string      `json:"name,omitempty"`
 	Color   string      `json:"color,omitempty"`
+	Source  string      `json:"source,omitempty"`
 }
 
 // Server manages the WebSocket connection to the extension.

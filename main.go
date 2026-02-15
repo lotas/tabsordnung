@@ -105,7 +105,13 @@ func main() {
 		summaryDir = filepath.Join(home, ".local", "share", "tabsordnung", "summaries")
 	}
 
-	model := tui.NewModel(profiles, *staleDays, *liveMode, srv, summaryDir, resolvedModel, ollamaHost)
+	signalDir := os.Getenv("TABSORDNUNG_SIGNAL_DIR")
+	if signalDir == "" {
+		home, _ := os.UserHomeDir()
+		signalDir = filepath.Join(home, ".local", "share", "tabsordnung", "signals")
+	}
+
+	model := tui.NewModel(profiles, *staleDays, *liveMode, srv, summaryDir, resolvedModel, ollamaHost, signalDir)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

@@ -140,6 +140,29 @@ func (m *DetailModel) ViewTabWithSummary(tab *types.Tab, summary string, summari
 	return base
 }
 
+// ViewTabWithSignal renders tab info with signal content.
+func (m *DetailModel) ViewTabWithSignal(tab *types.Tab, signalContent string, capturing bool, signalErr string) string {
+	base := m.ViewTab(tab)
+
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
+	activeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+
+	if capturing {
+		base += "\n" + activeStyle.Render("Capturing signal...")
+	} else if signalContent != "" {
+		base += "\n" + labelStyle.Render("Signals") + "\n" + signalContent
+	} else if signalErr != "" {
+		base += "\n" + errStyle.Render("Signal failed: "+signalErr)
+		base += "\n" + dimStyle.Render("  Press 'c' to retry")
+	} else {
+		base += "\n" + dimStyle.Render("  Press 'c' to capture signal")
+	}
+
+	return base
+}
+
 // ViewScrolled applies scroll offset and height truncation to the content string.
 func (m *DetailModel) ViewScrolled(content string) string {
 	if content == "" {

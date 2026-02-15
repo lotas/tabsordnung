@@ -16,6 +16,7 @@ import (
 	"github.com/lotas/tabsordnung/internal/analyzer"
 	"github.com/lotas/tabsordnung/internal/firefox"
 	"github.com/lotas/tabsordnung/internal/server"
+	"github.com/lotas/tabsordnung/internal/signal"
 	"github.com/lotas/tabsordnung/internal/summarize"
 	"github.com/lotas/tabsordnung/internal/types"
 )
@@ -34,6 +35,11 @@ type summarizeCompleteMsg struct {
 	url     string
 	summary string
 	err     error
+}
+
+type signalCompleteMsg struct {
+	source string
+	err    error
 }
 
 // SourceMode distinguishes live vs offline.
@@ -57,6 +63,7 @@ type wsCmdResponseMsg struct {
 	ok      bool
 	error   string
 	content string
+	items   string
 }
 
 // --- Command helpers ---
@@ -88,6 +95,13 @@ func sendCmdWithID(srv *server.Server, msg server.OutgoingMsg) (string, tea.Cmd)
 type SummarizeJob struct {
 	Tab       *types.Tab
 	ContentID string // non-empty = waiting for browser content (live mode)
+}
+
+// SignalJob tracks a single in-flight signal capture.
+type SignalJob struct {
+	Tab       *types.Tab
+	Source    string
+	ContentID string
 }
 
 // --- Model ---
@@ -135,9 +149,15 @@ type Model struct {
 
 	// Focus
 	focusDetail  bool
+
+	// Signals
+	signalDir     string
+	signalQueue   []*SignalJob
+	signalActive  *SignalJob
+	signalErrors  map[string]string
 }
 
-func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server, summaryDir, ollamaModel, ollamaHost string) Model {
+func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server, summaryDir, ollamaModel, ollamaHost, signalDir string) Model {
 	m := Model{
 		profiles:        profiles,
 		staleDays:       staleDays,
@@ -149,6 +169,8 @@ func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *serve
 		ollamaHost:      ollamaHost,
 		summarizeJobs:   make(map[string]*SummarizeJob),
 		summarizeErrors: make(map[string]string),
+		signalDir:       signalDir,
+		signalErrors:    make(map[string]string),
 	}
 	if liveMode {
 		m.mode = ModeLive
@@ -286,6 +308,35 @@ func runSummarizeWithContent(tab *types.Tab, content, outDir, model, host string
 	}
 }
 
+func (m *Model) processNextSignal() tea.Cmd {
+	if m.signalActive != nil || len(m.signalQueue) == 0 {
+		return nil
+	}
+	m.signalActive = m.signalQueue[0]
+	m.signalQueue = m.signalQueue[1:]
+
+	id, cmd := sendCmdWithID(m.server, server.OutgoingMsg{
+		Action: "scrape-activity",
+		TabID:  m.signalActive.Tab.BrowserID,
+		Source: m.signalActive.Source,
+	})
+	m.signalActive.ContentID = id
+	return cmd
+}
+
+func runWriteSignal(dir string, sig signal.Signal) tea.Cmd {
+	return func() tea.Msg {
+		path, err := signal.WriteSignal(dir, sig)
+		if err != nil {
+			return signalCompleteMsg{source: sig.Source, err: err}
+		}
+		if path != "" {
+			signal.AppendSignalLog(dir, sig)
+		}
+		return signalCompleteMsg{source: sig.Source}
+	}
+}
+
 func listenWebSocket(srv *server.Server) tea.Cmd {
 	return func() tea.Msg {
 		for {
@@ -316,7 +367,7 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 				return wsTabUpdatedMsg{tab: tab}
 			default:
 				if msg.ID != "" && msg.OK != nil {
-					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error, content: msg.Content}
+					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error, content: msg.Content, items: msg.Items}
 				}
 				// Unknown message type, skip and keep listening
 			}
@@ -504,6 +555,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, runSummarizeTab(node.Tab, m.summaryDir, m.ollamaModel, m.ollamaHost)
 			}
+		case "c":
+			if m.mode != ModeLive || !m.connected {
+				break
+			}
+			node := m.tree.SelectedNode()
+			if node == nil || node.Tab == nil {
+				break
+			}
+			source := signal.DetectSource(node.Tab.URL)
+			if source == "" {
+				break
+			}
+			alreadyQueued := false
+			for _, j := range m.signalQueue {
+				if j.Tab.BrowserID == node.Tab.BrowserID {
+					alreadyQueued = true
+					break
+				}
+			}
+			if alreadyQueued {
+				break
+			}
+			if m.signalActive != nil && m.signalActive.Tab.BrowserID == node.Tab.BrowserID {
+				break
+			}
+			delete(m.signalErrors, source)
+			job := &SignalJob{Tab: node.Tab, Source: source}
+			m.signalQueue = append(m.signalQueue, job)
+			return m, m.processNextSignal()
 		case "f":
 			m.showFilterPicker = true
 			m.filterPicker = NewFilterPicker(m.tree.Filter)
@@ -624,6 +704,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case signalCompleteMsg:
+		if msg.err != nil {
+			m.signalErrors[msg.source] = msg.err.Error()
+		} else {
+			delete(m.signalErrors, msg.source)
+		}
+		return m, m.processNextSignal()
+
 	case wsSnapshotMsg:
 		m.loading = false
 		m.connected = true
@@ -645,6 +733,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wsDisconnectedMsg:
 		m.connected = false
+		// Clear any in-flight signal job
+		if m.signalActive != nil {
+			m.signalErrors[m.signalActive.Source] = "disconnected"
+			m.signalActive = nil
+		}
+		m.signalQueue = nil
 		var cmds []tea.Cmd
 		for _, job := range m.summarizeJobs {
 			if job.ContentID != "" {
@@ -690,6 +784,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, listenWebSocket(m.server)
 
 	case wsCmdResponseMsg:
+		// Check if this response matches a signal job
+		if m.signalActive != nil && m.signalActive.ContentID == msg.id {
+			source := m.signalActive.Source
+			m.signalActive = nil
+			if !msg.ok {
+				m.signalErrors[source] = msg.error
+				return m, tea.Batch(listenWebSocket(m.server), m.processNextSignal())
+			}
+			items, err := signal.ParseItemsJSON(msg.items)
+			if err != nil || len(items) == 0 {
+				errMsg := "no items found"
+				if err != nil {
+					errMsg = err.Error()
+				}
+				m.signalErrors[source] = errMsg
+				return m, tea.Batch(listenWebSocket(m.server), m.processNextSignal())
+			}
+			sig := signal.Signal{
+				Source:     source,
+				CapturedAt: time.Now(),
+				Items:      items,
+			}
+			return m, tea.Batch(
+				listenWebSocket(m.server),
+				runWriteSignal(m.signalDir, sig),
+			)
+		}
 		// Check if this response matches a summarize job
 		for _, job := range m.summarizeJobs {
 			if job.ContentID != "" && job.ContentID == msg.id {
@@ -882,6 +1003,9 @@ func (m Model) View() string {
 	} else if n > 1 {
 		statsStr += fmt.Sprintf(" · summarizing %d tabs...", n)
 	}
+	if m.signalActive != nil {
+		statsStr += " · checking signals..."
+	}
 	topBar := topBarStyle.Render(profileStr + "  " + statsStr)
 
 	// Filter indicator
@@ -912,24 +1036,53 @@ func (m Model) View() string {
 	var detailContent string
 	if node := m.tree.SelectedNode(); node != nil {
 		if node.Tab != nil {
-			// Check for existing summary
-			var summaryText string
-			sumPath := summarize.SummaryPath(m.summaryDir, node.Tab.URL, node.Tab.Title)
-			if raw, err := summarize.ReadSummary(sumPath); err == nil {
-				// Render with glamour
-				r, _ := glamour.NewTermRenderer(
-					glamour.WithStylePath("dark"),
-					glamour.WithWordWrap(m.detail.Width-2),
-				)
-				if rendered, err := r.Render(raw); err == nil {
-					summaryText = rendered
-				} else {
-					summaryText = raw
+			source := signal.DetectSource(node.Tab.URL)
+			if source != "" {
+				// Signal source tab — show signals
+				var signalContent string
+				signals, _ := signal.ReadSignals(m.signalDir, source)
+				if len(signals) > 0 {
+					raw := signal.RenderSignalsMarkdown(signals)
+					r, _ := glamour.NewTermRenderer(
+						glamour.WithStylePath("dark"),
+						glamour.WithWordWrap(m.detail.Width-2),
+					)
+					if rendered, err := r.Render(raw); err == nil {
+						signalContent = rendered
+					} else {
+						signalContent = raw
+					}
 				}
+				isCapturing := m.signalActive != nil && m.signalActive.Source == source
+				if !isCapturing {
+					for _, j := range m.signalQueue {
+						if j.Source == source {
+							isCapturing = true
+							break
+						}
+					}
+				}
+				sigErr := m.signalErrors[source]
+				detailContent = m.detail.ViewTabWithSignal(node.Tab, signalContent, isCapturing, sigErr)
+			} else {
+				// Regular tab — show summary
+				var summaryText string
+				sumPath := summarize.SummaryPath(m.summaryDir, node.Tab.URL, node.Tab.Title)
+				if raw, err := summarize.ReadSummary(sumPath); err == nil {
+					r, _ := glamour.NewTermRenderer(
+						glamour.WithStylePath("dark"),
+						glamour.WithWordWrap(m.detail.Width-2),
+					)
+					if rendered, err := r.Render(raw); err == nil {
+						summaryText = rendered
+					} else {
+						summaryText = raw
+					}
+				}
+				_, isSummarizing := m.summarizeJobs[node.Tab.URL]
+				tabErr := m.summarizeErrors[node.Tab.URL]
+				detailContent = m.detail.ViewTabWithSummary(node.Tab, summaryText, isSummarizing, tabErr)
 			}
-			_, isSummarizing := m.summarizeJobs[node.Tab.URL]
-			tabErr := m.summarizeErrors[node.Tab.URL]
-			detailContent = m.detail.ViewTabWithSummary(node.Tab, summaryText, isSummarizing, tabErr)
 		} else if node.Group != nil {
 			detailContent = m.detail.ViewGroup(node.Group)
 		}
@@ -956,7 +1109,7 @@ func (m Model) View() string {
 		}
 		bottomText += "space select \u00b7 enter focus \u00b7 "
 	}
-	bottomText += "\u2191\u2193/jk navigate \u00b7 h/l collapse/expand \u00b7 tab focus \u00b7 s summarize \u00b7 f filter \u00b7 r refresh \u00b7 1-9 source \u00b7 q quit  " + filterStr
+	bottomText += "\u2191\u2193/jk navigate \u00b7 h/l collapse/expand \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 f filter \u00b7 r refresh \u00b7 1-9 source \u00b7 q quit  " + filterStr
 	bottomBar := bottomBarStyle.Render(bottomText)
 
 	return lipgloss.JoinVertical(lipgloss.Left, topBar, panes, bottomBar)

@@ -1,5 +1,6 @@
 const PORT = 19191;
 const RECONNECT_BASE_MS = 1000;
+const ALARM_NAME = "keepalive";
 const RECONNECT_MAX_MS = 30000;
 
 let ws = null;
@@ -34,6 +35,13 @@ function scheduleReconnect() {
     connect();
     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
   }, reconnectDelay);
+}
+
+function ensureConnected() {
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    reconnectDelay = RECONNECT_BASE_MS;
+    connect();
+  }
 }
 
 function send(obj) {
@@ -83,18 +91,22 @@ function serializeGroup(group) {
 // --- Events ---
 
 browser.tabs.onCreated.addListener((tab) => {
+  ensureConnected();
   send({ type: "tab.created", tab: serializeTab(tab) });
 });
 
 browser.tabs.onRemoved.addListener((tabId) => {
+  ensureConnected();
   send({ type: "tab.removed", tabId });
 });
 
 browser.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
+  ensureConnected();
   send({ type: "tab.updated", tab: serializeTab(tab) });
 });
 
 browser.tabs.onMoved.addListener(async (tabId) => {
+  ensureConnected();
   const tab = await browser.tabs.get(tabId);
   send({ type: "tab.moved", tab: serializeTab(tab) });
 });
@@ -151,6 +163,63 @@ async function handleCommand(msg) {
         // Firefox doesn't have native tab groups API yet
         send({ id: msg.id, ok: true, groupId: -1 });
         return;
+      case "scrape-activity": {
+        const scrapers = {
+          gmail: () => {
+            const rows = document.querySelectorAll("tr.zE");
+            return Array.from(rows).slice(0, 20).map(row => {
+              const sender = row.querySelector(".yX.yW span")?.getAttribute("name") || row.querySelector(".yX.yW")?.textContent?.trim() || "";
+              const subject = row.querySelector(".bog span")?.textContent?.trim() || row.querySelector(".y6 span")?.textContent?.trim() || "";
+              return { title: sender, preview: subject };
+            });
+          },
+          slack: () => {
+            const unreads = document.querySelectorAll(".p-channel_sidebar__link--unread .p-channel_sidebar__name");
+            if (unreads.length > 0) {
+              return Array.from(unreads).slice(0, 20).map(el => ({
+                title: el.textContent?.trim() || "",
+                preview: "unread channel",
+              }));
+            }
+            const msgs = document.querySelectorAll("[data-qa='virtual-list-item'] .c-message_kit__text");
+            return Array.from(msgs).slice(-20).map(el => ({
+              title: "",
+              preview: el.textContent?.trim() || "",
+            }));
+          },
+          matrix: () => {
+            const badges = document.querySelectorAll(".mx_RoomTile_badge, .mx_NotificationBadge");
+            const rooms = document.querySelectorAll(".mx_RoomTile");
+            const items = [];
+            rooms.forEach(room => {
+              const badge = room.querySelector(".mx_RoomTile_badge, .mx_NotificationBadge");
+              if (badge && badge.textContent?.trim() !== "0") {
+                const name = room.querySelector(".mx_RoomTile_title")?.textContent?.trim() || "";
+                items.push({ title: name, preview: badge.textContent?.trim() + " unread" });
+              }
+            });
+            return items.length > 0 ? items : Array.from(badges).slice(0, 20).map(b => ({
+              title: "",
+              preview: b.textContent?.trim() + " notifications",
+            }));
+          },
+        };
+
+        const scraper = scrapers[msg.source];
+        if (!scraper) {
+          send({ id: msg.id, ok: false, error: `unknown source: ${msg.source}` });
+          return;
+        }
+
+        const results = await browser.scripting.executeScript({
+          target: { tabId: msg.tabId },
+          func: scraper,
+        });
+
+        const items = results?.[0]?.result || [];
+        send({ id: msg.id, ok: true, items: JSON.stringify(items), source: msg.source });
+        return;
+      }
       default:
         send({ id: msg.id, ok: false, error: `unknown action: ${msg.action}` });
         return;
@@ -162,5 +231,13 @@ async function handleCommand(msg) {
 }
 
 // --- Start ---
+
+browser.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
+
+browser.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === ALARM_NAME) {
+    ensureConnected();
+  }
+});
 
 connect();
