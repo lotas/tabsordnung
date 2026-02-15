@@ -25,6 +25,28 @@ func intPtr(i int) *int {
 	return &i
 }
 
+func TestSignalsTableExists(t *testing.T) {
+	db := testDB(t)
+
+	_, err := db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at)
+		VALUES ('gmail', 'Alice', 'hello', '2:30 PM', CURRENT_TIMESTAMP)`)
+	if err != nil {
+		t.Fatalf("insert into signals: %v", err)
+	}
+
+	_, err = db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at)
+		VALUES ('gmail', 'Alice', 'different preview', '2:30 PM', CURRENT_TIMESTAMP)`)
+	if err == nil {
+		t.Fatal("expected unique constraint violation")
+	}
+
+	_, err = db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at)
+		VALUES ('gmail', 'Alice', 'hello', '3:00 PM', CURRENT_TIMESTAMP)`)
+	if err != nil {
+		t.Fatalf("insert with different source_ts: %v", err)
+	}
+}
+
 func TestOpenDB(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "sub", "dir", "tabsordnung.db")
@@ -105,11 +127,11 @@ func TestOpenDB_MigratesOldSchema(t *testing.T) {
 	}
 	defer db2.Close()
 
-	// Both migrations should be recorded.
+	// All migrations should be recorded.
 	var count int
 	db2.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count)
-	if count != 2 {
-		t.Errorf("expected 2 migrations recorded, got %d", count)
+	if count != len(migrations) {
+		t.Errorf("expected %d migrations recorded, got %d", len(migrations), count)
 	}
 
 	// Old snapshots should be preserved with assigned rev numbers.

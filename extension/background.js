@@ -170,7 +170,8 @@ async function handleCommand(msg) {
             return Array.from(rows).slice(0, 20).map(row => {
               const sender = row.querySelector(".yX.yW span")?.getAttribute("name") || row.querySelector(".yX.yW")?.textContent?.trim() || "";
               const subject = row.querySelector(".bog span")?.textContent?.trim() || row.querySelector(".y6 span")?.textContent?.trim() || "";
-              return { title: sender, preview: subject };
+              const timestamp = row.querySelector("td.xW span")?.getAttribute("title") || row.querySelector("td.xW span")?.textContent?.trim() || "";
+              return { title: sender, preview: subject, timestamp };
             });
           },
           slack: () => {
@@ -179,29 +180,27 @@ async function handleCommand(msg) {
               return Array.from(unreads).slice(0, 20).map(el => ({
                 title: el.textContent?.trim() || "",
                 preview: "unread channel",
+                timestamp: "",
               }));
             }
             const msgs = document.querySelectorAll("[data-qa='virtual-list-item'] .c-message_kit__text");
             return Array.from(msgs).slice(-20).map(el => ({
               title: "",
               preview: el.textContent?.trim() || "",
+              timestamp: "",
             }));
           },
           matrix: () => {
-            const badges = document.querySelectorAll(".mx_RoomTile_badge, .mx_NotificationBadge");
             const rooms = document.querySelectorAll(".mx_RoomTile");
             const items = [];
             rooms.forEach(room => {
               const badge = room.querySelector(".mx_RoomTile_badge, .mx_NotificationBadge");
               if (badge && badge.textContent?.trim() !== "0") {
                 const name = room.querySelector(".mx_RoomTile_title")?.textContent?.trim() || "";
-                items.push({ title: name, preview: badge.textContent?.trim() + " unread" });
+                items.push({ title: name, preview: badge.textContent?.trim() + " unread", timestamp: "" });
               }
             });
-            return items.length > 0 ? items : Array.from(badges).slice(0, 20).map(b => ({
-              title: "",
-              preview: b.textContent?.trim() + " notifications",
-            }));
+            return items;
           },
         };
 

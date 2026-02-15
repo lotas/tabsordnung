@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/lotas/tabsordnung/internal/firefox"
 	"github.com/lotas/tabsordnung/internal/server"
 	"github.com/lotas/tabsordnung/internal/signal"
+	"github.com/lotas/tabsordnung/internal/storage"
 	"github.com/lotas/tabsordnung/internal/summarize"
 	"github.com/lotas/tabsordnung/internal/types"
 )
@@ -38,6 +40,11 @@ type summarizeCompleteMsg struct {
 }
 
 type signalCompleteMsg struct {
+	source string
+	err    error
+}
+
+type signalActionMsg struct {
 	source string
 	err    error
 }
@@ -151,13 +158,16 @@ type Model struct {
 	focusDetail  bool
 
 	// Signals
-	signalDir     string
+	db            *sql.DB
 	signalQueue   []*SignalJob
 	signalActive  *SignalJob
 	signalErrors  map[string]string
+	signals       []storage.SignalRecord  // signals for currently viewed source
+	signalCursor  int                      // cursor position in signal list
+	signalSource  string                   // source of currently loaded signals
 }
 
-func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server, summaryDir, ollamaModel, ollamaHost, signalDir string) Model {
+func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server, summaryDir, ollamaModel, ollamaHost string, db *sql.DB) Model {
 	m := Model{
 		profiles:        profiles,
 		staleDays:       staleDays,
@@ -169,7 +179,7 @@ func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *serve
 		ollamaHost:      ollamaHost,
 		summarizeJobs:   make(map[string]*SummarizeJob),
 		summarizeErrors: make(map[string]string),
-		signalDir:       signalDir,
+		db:              db,
 		signalErrors:    make(map[string]string),
 	}
 	if liveMode {
@@ -324,16 +334,35 @@ func (m *Model) processNextSignal() tea.Cmd {
 	return cmd
 }
 
-func runWriteSignal(dir string, sig signal.Signal) tea.Cmd {
+func runReconcileSignals(db *sql.DB, source string, items []signal.SignalItem, capturedAt time.Time) tea.Cmd {
 	return func() tea.Msg {
-		path, err := signal.WriteSignal(dir, sig)
+		records := make([]storage.SignalRecord, len(items))
+		for i, item := range items {
+			records[i] = storage.SignalRecord{
+				Title:    item.Title,
+				Preview:  item.Preview,
+				SourceTS: item.Timestamp,
+			}
+		}
+		err := storage.ReconcileSignals(db, source, records, capturedAt)
 		if err != nil {
-			return signalCompleteMsg{source: sig.Source, err: err}
+			return signalCompleteMsg{source: source, err: err}
 		}
-		if path != "" {
-			signal.AppendSignalLog(dir, sig)
-		}
-		return signalCompleteMsg{source: sig.Source}
+		return signalCompleteMsg{source: source}
+	}
+}
+
+func completeSignalCmd(db *sql.DB, id int64, source string) tea.Cmd {
+	return func() tea.Msg {
+		err := storage.CompleteSignal(db, id)
+		return signalActionMsg{source: source, err: err}
+	}
+}
+
+func reopenSignalCmd(db *sql.DB, id int64, source string) tea.Cmd {
+	return func() tea.Msg {
+		err := storage.ReopenSignal(db, id)
+		return signalActionMsg{source: source, err: err}
 	}
 }
 
@@ -406,23 +435,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Detail pane focus mode
 		if m.focusDetail {
-			switch msg.String() {
-			case "tab":
-				m.focusDetail = false
-				m.detail.Scroll = 0
-				return m, nil
-			case "j", "down":
-				m.detail.ScrollDown()
-				return m, nil
-			case "k", "up":
-				m.detail.ScrollUp()
-				return m, nil
-			case "s":
-				return m, nil // handled below in main key handler
-			case "q", "ctrl+c":
-				return m, tea.Quit
+			// Signal navigation when viewing a signal-source tab.
+			if m.signalSource != "" && len(m.signals) > 0 {
+				switch msg.String() {
+				case "j", "down":
+					if m.signalCursor < len(m.signals)-1 {
+						m.signalCursor++
+					}
+					return m, nil
+				case "k", "up":
+					if m.signalCursor > 0 {
+						m.signalCursor--
+					}
+					return m, nil
+				case "x":
+					sig := m.signals[m.signalCursor]
+					if sig.CompletedAt == nil {
+						return m, completeSignalCmd(m.db, sig.ID, m.signalSource)
+					}
+					return m, nil
+				case "u":
+					sig := m.signals[m.signalCursor]
+					if sig.CompletedAt != nil {
+						return m, reopenSignalCmd(m.db, sig.ID, m.signalSource)
+					}
+					return m, nil
+				case "tab":
+					m.focusDetail = false
+					m.detail.Scroll = 0
+					return m, nil
+				case "q", "ctrl+c":
+					return m, tea.Quit
+				case "c":
+					// Fall through to main 'c' handler below by breaking out
+				default:
+					return m, nil
+				}
+			} else {
+				// Existing non-signal detail focus handling
+				switch msg.String() {
+				case "tab":
+					m.focusDetail = false
+					m.detail.Scroll = 0
+					return m, nil
+				case "j", "down":
+					m.detail.ScrollDown()
+					return m, nil
+				case "k", "up":
+					m.detail.ScrollUp()
+					return m, nil
+				case "s":
+					// fall through to main handler
+				case "q", "ctrl+c":
+					return m, tea.Quit
+				default:
+					return m, nil
+				}
 			}
-			return m, nil
 		}
 
 		// Group picker mode
@@ -518,8 +587,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "up", "k":
 			m.tree.MoveUp()
+			m.refreshSignals()
 		case "down", "j":
 			m.tree.MoveDown()
+			m.refreshSignals()
 		case "enter":
 			if m.mode == ModeLive && m.connected {
 				node := m.tree.SelectedNode()
@@ -623,6 +694,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.tree.MoveDown()
+			m.refreshSignals()
 		case "g":
 			if m.mode != ModeLive || !m.connected || m.session == nil {
 				return m, nil
@@ -710,7 +782,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			delete(m.signalErrors, msg.source)
 		}
+		// Reload signals for current source.
+		if m.signalSource != "" {
+			m.signals, _ = storage.ListSignals(m.db, m.signalSource, true)
+		}
 		return m, m.processNextSignal()
+
+	case signalActionMsg:
+		if msg.err != nil {
+			m.signalErrors[msg.source] = msg.err.Error()
+		}
+		// Reload signals.
+		if m.signalSource != "" {
+			m.signals, _ = storage.ListSignals(m.db, m.signalSource, true)
+			if m.signalCursor >= len(m.signals) {
+				m.signalCursor = len(m.signals) - 1
+			}
+			if m.signalCursor < 0 {
+				m.signalCursor = 0
+			}
+		}
+		return m, nil
 
 	case wsSnapshotMsg:
 		m.loading = false
@@ -801,14 +893,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.signalErrors[source] = errMsg
 				return m, tea.Batch(listenWebSocket(m.server), m.processNextSignal())
 			}
-			sig := signal.Signal{
-				Source:     source,
-				CapturedAt: time.Now(),
-				Items:      items,
-			}
 			return m, tea.Batch(
 				listenWebSocket(m.server),
-				runWriteSignal(m.signalDir, sig),
+				runReconcileSignals(m.db, source, items, time.Now()),
 			)
 		}
 		// Check if this response matches a summarize job
@@ -834,6 +921,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) refreshSignals() {
+	node := m.tree.SelectedNode()
+	var source string
+	if node != nil && node.Tab != nil {
+		source = signal.DetectSource(node.Tab.URL)
+	}
+	if source != m.signalSource {
+		m.signalSource = source
+		m.signalCursor = 0
+		if source != "" && m.db != nil {
+			m.signals, _ = storage.ListSignals(m.db, source, true)
+		} else {
+			m.signals = nil
+		}
+	}
 }
 
 func (m *Model) rebuildTree() {
@@ -876,6 +980,7 @@ func (m *Model) rebuildTree() {
 	}
 	m.tree.Cursor = oldCursor
 	m.tree.Offset = oldOffset
+	m.refreshSignals()
 }
 
 func (m *Model) removeTab(browserID int) {
@@ -1036,34 +1141,18 @@ func (m Model) View() string {
 	var detailContent string
 	if node := m.tree.SelectedNode(); node != nil {
 		if node.Tab != nil {
-			source := signal.DetectSource(node.Tab.URL)
-			if source != "" {
-				// Signal source tab — show signals
-				var signalContent string
-				signals, _ := signal.ReadSignals(m.signalDir, source)
-				if len(signals) > 0 {
-					raw := signal.RenderSignalsMarkdown(signals)
-					r, _ := glamour.NewTermRenderer(
-						glamour.WithStylePath("dark"),
-						glamour.WithWordWrap(m.detail.Width-2),
-					)
-					if rendered, err := r.Render(raw); err == nil {
-						signalContent = rendered
-					} else {
-						signalContent = raw
-					}
-				}
-				isCapturing := m.signalActive != nil && m.signalActive.Source == source
+			if m.signalSource != "" {
+				isCapturing := m.signalActive != nil && m.signalActive.Source == m.signalSource
 				if !isCapturing {
 					for _, j := range m.signalQueue {
-						if j.Source == source {
+						if j.Source == m.signalSource {
 							isCapturing = true
 							break
 						}
 					}
 				}
-				sigErr := m.signalErrors[source]
-				detailContent = m.detail.ViewTabWithSignal(node.Tab, signalContent, isCapturing, sigErr)
+				sigErr := m.signalErrors[m.signalSource]
+				detailContent = m.detail.ViewTabWithSignal(node.Tab, m.signals, m.signalCursor, isCapturing, sigErr)
 			} else {
 				// Regular tab — show summary
 				var summaryText string

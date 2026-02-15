@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/lotas/tabsordnung/internal/storage"
 	"github.com/lotas/tabsordnung/internal/types"
 )
 
@@ -140,27 +141,76 @@ func (m *DetailModel) ViewTabWithSummary(tab *types.Tab, summary string, summari
 	return base
 }
 
-// ViewTabWithSignal renders tab info with signal content.
-func (m *DetailModel) ViewTabWithSignal(tab *types.Tab, signalContent string, capturing bool, signalErr string) string {
+// ViewTabWithSignal renders tab info with signal list from database.
+func (m *DetailModel) ViewTabWithSignal(tab *types.Tab, signals []storage.SignalRecord, signalCursor int, capturing bool, signalErr string) string {
 	base := m.ViewTab(tab)
 
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
 	activeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	completedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
 
 	if capturing {
 		base += "\n" + activeStyle.Render("Capturing signal...")
-	} else if signalContent != "" {
-		base += "\n" + labelStyle.Render("Signals") + "\n" + signalContent
+	}
+
+	if len(signals) > 0 {
+		var activeCount, completedCount int
+		for _, s := range signals {
+			if s.CompletedAt == nil {
+				activeCount++
+			} else {
+				completedCount++
+			}
+		}
+
+		base += "\n" + labelStyle.Render(fmt.Sprintf("Signals — %d active, %d completed", activeCount, completedCount)) + "\n\n"
+
+		for i, s := range signals {
+			prefix := "  "
+			if i == signalCursor {
+				prefix = "> "
+			}
+
+			age := formatSignalAge(s.CapturedAt)
+			line := fmt.Sprintf("[%d] %s", s.ID, s.Title)
+			if s.Preview != "" {
+				line += " — " + s.Preview
+			}
+			line = prefix + line + "  " + age
+
+			if i == signalCursor {
+				base += cursorStyle.Render(line) + "\n"
+			} else if s.CompletedAt != nil {
+				base += completedStyle.Render(prefix+"✓ "+line[2:]) + "\n"
+			} else {
+				base += line + "\n"
+			}
+		}
+
+		base += "\n" + dimStyle.Render("  c capture · x complete · u reopen")
 	} else if signalErr != "" {
 		base += "\n" + errStyle.Render("Signal failed: "+signalErr)
 		base += "\n" + dimStyle.Render("  Press 'c' to retry")
-	} else {
+	} else if !capturing {
 		base += "\n" + dimStyle.Render("  Press 'c' to capture signal")
 	}
 
 	return base
+}
+
+func formatSignalAge(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
 }
 
 // ViewScrolled applies scroll offset and height truncation to the content string.

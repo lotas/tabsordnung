@@ -43,6 +43,9 @@ func main() {
 		case "profiles":
 			runProfiles()
 			return
+		case "signals":
+			runSignals(os.Args[2:])
+			return
 		case "help", "--help", "-h":
 			printHelp()
 			return
@@ -105,13 +108,14 @@ func main() {
 		summaryDir = filepath.Join(home, ".local", "share", "tabsordnung", "summaries")
 	}
 
-	signalDir := os.Getenv("TABSORDNUNG_SIGNAL_DIR")
-	if signalDir == "" {
-		home, _ := os.UserHomeDir()
-		signalDir = filepath.Join(home, ".local", "share", "tabsordnung", "signals")
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
 	}
+	defer db.Close()
 
-	model := tui.NewModel(profiles, *staleDays, *liveMode, srv, summaryDir, resolvedModel, ollamaHost, signalDir)
+	model := tui.NewModel(profiles, *staleDays, *liveMode, srv, summaryDir, resolvedModel, ollamaHost, db)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
@@ -144,6 +148,11 @@ Usage:
   tabsordnung snapshot diff [rev] [rev2] [--profile X] Compare snapshots or current tabs
   tabsordnung snapshot delete <rev> [--profile X] [--yes]  Delete a snapshot
   tabsordnung snapshot restore <rev> [--profile X] [--port N]  Restore tabs via live mode
+
+  tabsordnung signals                                    List active signals
+  tabsordnung signals list [--all] [--json] [--source X] List signals
+  tabsordnung signals complete <id>                      Mark signal as completed
+  tabsordnung signals reopen <id>                        Reopen a completed signal
 
   tabsordnung triage                                   Classify GitHub tabs into groups
     --profile <name>       Firefox profile name
@@ -734,4 +743,110 @@ func runSummarize(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runSignals(args []string) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		runSignalsList(args)
+		return
+	}
+
+	subcmd := args[0]
+	subArgs := args[1:]
+
+	switch subcmd {
+	case "list":
+		runSignalsList(subArgs)
+	case "complete":
+		runSignalsComplete(subArgs)
+	case "reopen":
+		runSignalsReopen(subArgs)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown signals command %q. Use list, complete, or reopen.\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func runSignalsList(args []string) {
+	fs := flag.NewFlagSet("signals list", flag.ExitOnError)
+	showAll := fs.Bool("all", false, "Include completed signals")
+	jsonFlag := fs.Bool("json", false, "Output as JSON")
+	source := fs.String("source", "", "Filter by source (gmail, slack, matrix)")
+	fs.Parse(args)
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	sigs, err := storage.ListSignals(db, *source, *showAll)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing signals: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonFlag {
+		out, err := storage.FormatSignalsJSON(sigs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(out)
+	} else {
+		fmt.Print(storage.FormatSignalsMarkdown(sigs))
+	}
+}
+
+func runSignalsComplete(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: tabsordnung signals complete <id>")
+		os.Exit(1)
+	}
+
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid signal ID: %s\n", args[0])
+		os.Exit(1)
+	}
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := storage.CompleteSignal(db, id); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Signal %d marked as completed.\n", id)
+}
+
+func runSignalsReopen(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: tabsordnung signals reopen <id>")
+		os.Exit(1)
+	}
+
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid signal ID: %s\n", args[0])
+		os.Exit(1)
+	}
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := storage.ReopenSignal(db, id); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Signal %d reopened.\n", id)
 }

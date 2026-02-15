@@ -137,6 +137,23 @@ DROP TABLE snapshot_tabs_old;
 DROP TABLE snapshot_groups_old;
 DROP TABLE snapshots_old;`,
 	},
+	{
+		Version:     3,
+		Description: "create signals table",
+		SQL: `
+CREATE TABLE signals (
+    id              INTEGER PRIMARY KEY,
+    source          TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    preview         TEXT DEFAULT '',
+    source_ts       TEXT NOT NULL DEFAULT '',
+    captured_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at    DATETIME,
+    auto_completed  BOOLEAN DEFAULT 0,
+    pinned          BOOLEAN DEFAULT 0,
+    UNIQUE(source, title, source_ts)
+);`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.
