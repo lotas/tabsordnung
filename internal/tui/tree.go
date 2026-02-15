@@ -74,6 +74,20 @@ func (m TreeModel) matchesFilter(tab *types.Tab) bool {
 		return tab.StaleDays > 90
 	case types.FilterGitHubDone:
 		return tab.GitHubStatus == "closed" || tab.GitHubStatus == "merged"
+	case types.FilterHasSummary:
+		if m.SummaryDir == "" {
+			return false
+		}
+		p := summarize.SummaryPath(m.SummaryDir, tab.URL, tab.Title)
+		_, err := os.Stat(p)
+		return err == nil
+	case types.FilterNoSummary:
+		if m.SummaryDir == "" {
+			return true
+		}
+		p := summarize.SummaryPath(m.SummaryDir, tab.URL, tab.Title)
+		_, err := os.Stat(p)
+		return err != nil
 	default:
 		return true
 	}

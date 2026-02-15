@@ -79,6 +79,8 @@ const (
 	FilterAge30
 	FilterAge90
 	FilterGitHubDone
+	FilterHasSummary
+	FilterNoSummary
 )
 
 // SortMode controls tab ordering.

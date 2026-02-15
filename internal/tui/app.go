@@ -547,6 +547,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.groupPicker.Height = m.height
 		case "esc":
 			m.selected = make(map[int]bool)
+		case "p":
+			m.showPicker = true
+			m.picker = NewSourcePicker(m.profiles)
+			m.picker.Width = m.width
+			m.picker.Height = m.height
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			m.picker = NewSourcePicker(m.profiles)
 			n := int(msg.String()[0] - '0')
@@ -867,7 +872,7 @@ func (m Model) View() string {
 	topBar := topBarStyle.Render(profileStr + "  " + statsStr)
 
 	// Filter indicator
-	filterNames := []string{"all", "stale", "dead", "duplicate", ">7d", ">30d", ">90d", "gh done"}
+	filterNames := []string{"all", "stale", "dead", "duplicate", ">7d", ">30d", ">90d", "gh done", "summarized", "unsummarized"}
 	filterStr := fmt.Sprintf("[filter: %s]", filterNames[m.tree.Filter])
 
 	// Panes

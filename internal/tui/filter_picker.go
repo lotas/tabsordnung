@@ -29,6 +29,8 @@ func NewFilterPicker(current types.FilterMode) FilterPicker {
 		{"Older than 30 days", types.FilterAge30},
 		{"Older than 90 days", types.FilterAge90},
 		{"GitHub done", types.FilterGitHubDone},
+		{"Has summary", types.FilterHasSummary},
+		{"No summary", types.FilterNoSummary},
 	}
 	cursor := 0
 	for i, opt := range options {
