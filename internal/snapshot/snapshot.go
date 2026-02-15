@@ -13,8 +13,44 @@ import (
 )
 
 // Create converts a SessionData into storage types and persists a snapshot.
-// Groups with an empty ID (the virtual "Ungrouped" group) are skipped.
-func Create(db *sql.DB, name string, session *types.SessionData) error {
+// It first checks the latest snapshot for the profile and skips saving if
+// the URL sets are identical. Returns the rev number, whether a new snapshot
+// was created, the diff against the previous snapshot (nil if first), and error.
+func Create(db *sql.DB, session *types.SessionData, label string) (rev int, created bool, diff *DiffResult, err error) {
+	profile := session.Profile.Name
+
+	// Check latest snapshot for changes.
+	latest, err := storage.GetLatestSnapshot(db, profile)
+	if err != nil {
+		return 0, false, nil, fmt.Errorf("get latest snapshot: %w", err)
+	}
+
+	if latest != nil {
+		// Compare URL sets.
+		latestURLs := make(map[string]bool, len(latest.Tabs))
+		for _, tab := range latest.Tabs {
+			latestURLs[tab.URL] = true
+		}
+		currentURLs := make(map[string]bool, len(session.AllTabs))
+		for _, tab := range session.AllTabs {
+			currentURLs[tab.URL] = true
+		}
+
+		identical := len(latestURLs) == len(currentURLs)
+		if identical {
+			for url := range currentURLs {
+				if !latestURLs[url] {
+					identical = false
+					break
+				}
+			}
+		}
+
+		if identical {
+			return latest.Rev, false, nil, nil
+		}
+	}
+
 	// Convert groups, skipping the virtual "Ungrouped" group (empty ID).
 	var groups []storage.SnapshotGroup
 	groupIndex := make(map[string]int) // GroupID -> index in groups slice
@@ -48,21 +84,68 @@ func Create(db *sql.DB, name string, session *types.SessionData) error {
 		tabs = append(tabs, tab)
 	}
 
-	if err := storage.CreateSnapshot(db, name, session.Profile.Name, groups, tabs); err != nil {
-		return err
+	newRev, err := storage.CreateSnapshot(db, profile, groups, tabs, label)
+	if err != nil {
+		return 0, false, nil, err
 	}
 
-	fmt.Printf("Snapshot %q created: %d tabs in %d groups\n", name, len(tabs), len(groups))
-	return nil
+	// Compute diff for output (only if there was a previous snapshot).
+	if latest != nil {
+		diff = diffSnapshots(latest, session)
+	}
+
+	return newRev, true, diff, nil
+}
+
+// diffSnapshots compares a stored snapshot against current session data.
+func diffSnapshots(snap *storage.SnapshotFull, current *types.SessionData) *DiffResult {
+	snapshotURLs := make(map[string]DiffEntry, len(snap.Tabs))
+	for _, tab := range snap.Tabs {
+		snapshotURLs[tab.URL] = DiffEntry{
+			URL:   tab.URL,
+			Title: tab.Title,
+			Group: tab.GroupName,
+		}
+	}
+
+	groupNames := make(map[string]string)
+	for _, g := range current.Groups {
+		if g.ID != "" {
+			groupNames[g.ID] = g.Name
+		}
+	}
+
+	currentURLs := make(map[string]DiffEntry, len(current.AllTabs))
+	for _, tab := range current.AllTabs {
+		groupName := ""
+		if tab.GroupID != "" {
+			groupName = groupNames[tab.GroupID]
+		}
+		currentURLs[tab.URL] = DiffEntry{
+			URL:   tab.URL,
+			Title: tab.Title,
+			Group: groupName,
+		}
+	}
+
+	result := &DiffResult{}
+	for url, entry := range currentURLs {
+		if _, ok := snapshotURLs[url]; !ok {
+			result.Added = append(result.Added, entry)
+		}
+	}
+	for url, entry := range snapshotURLs {
+		if _, ok := currentURLs[url]; !ok {
+			result.Removed = append(result.Removed, entry)
+		}
+	}
+
+	return result
 }
 
 // Restore reopens tabs from a snapshot via the live mode WebSocket bridge.
-// It starts a WebSocket server, waits for the Firefox extension to connect,
-// creates groups, and opens all tabs. Note: for V1, tabs are opened ungrouped
-// after creation — the "open" action does not assign tabs to groups. Group
-// assignment after opening is a future enhancement.
-func Restore(db *sql.DB, name string, port int) error {
-	snap, err := storage.GetSnapshot(db, name)
+func Restore(db *sql.DB, profile string, rev int, port int) error {
+	snap, err := storage.GetSnapshot(db, profile, rev)
 	if err != nil {
 		return err
 	}
@@ -138,6 +221,6 @@ func Restore(db *sql.DB, name string, port int) error {
 		return fmt.Errorf("timed out waiting for open tabs confirmation")
 	}
 
-	fmt.Fprintf(os.Stderr, "Restored %d tabs from snapshot %q\n", len(snap.Tabs), name)
+	fmt.Fprintf(os.Stderr, "Restored %d tabs from snapshot #%d\n", len(snap.Tabs), rev)
 	return nil
 }

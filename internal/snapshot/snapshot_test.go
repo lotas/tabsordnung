@@ -23,110 +23,150 @@ func testDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func TestCreateFromSession(t *testing.T) {
+func TestCreateFirstSnapshot(t *testing.T) {
 	db := testDB(t)
 
-	// Build a SessionData with one real group, one Ungrouped (empty ID), and tabs.
-	realGroup := &types.TabGroup{
-		ID:    "g1",
-		Name:  "Work",
-		Color: "blue",
-	}
-	ungroupedGroup := &types.TabGroup{
-		ID:   "", // virtual Ungrouped group
-		Name: "Ungrouped",
-	}
-
-	tab1 := &types.Tab{
-		URL:     "https://example.com",
-		Title:   "Example",
-		GroupID: "g1",
-		Pinned:  true,
-	}
-	tab2 := &types.Tab{
-		URL:     "https://go.dev",
-		Title:   "Go",
-		GroupID: "g1",
-		Pinned:  false,
-	}
-	tab3 := &types.Tab{
-		URL:    "https://ungrouped.com",
-		Title:  "Ungrouped Tab",
-		Pinned: false,
-	}
-
-	realGroup.Tabs = []*types.Tab{tab1, tab2}
-	ungroupedGroup.Tabs = []*types.Tab{tab3}
-
 	session := &types.SessionData{
-		Groups:  []*types.TabGroup{realGroup, ungroupedGroup},
-		AllTabs: []*types.Tab{tab1, tab2, tab3},
-		Profile: types.Profile{Name: "default"},
+		Groups: []*types.TabGroup{
+			{ID: "g1", Name: "Work", Color: "blue", Tabs: []*types.Tab{
+				{URL: "https://example.com", Title: "Example", GroupID: "g1", Pinned: true},
+			}},
+			{ID: "", Name: "Ungrouped", Tabs: []*types.Tab{
+				{URL: "https://ungrouped.com", Title: "Ungrouped"},
+			}},
+		},
+		AllTabs: []*types.Tab{
+			{URL: "https://example.com", Title: "Example", GroupID: "g1", Pinned: true},
+			{URL: "https://ungrouped.com", Title: "Ungrouped"},
+		},
+		Profile:  types.Profile{Name: "default"},
 		ParsedAt: time.Now(),
 	}
 
-	err := Create(db, "test-snap", session)
+	rev, created, diff, err := Create(db, session, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !created {
+		t.Fatal("expected created=true for first snapshot")
+	}
+	if rev != 1 {
+		t.Errorf("expected rev 1, got %d", rev)
+	}
+	if diff != nil {
+		t.Error("expected nil diff for first snapshot")
+	}
+
+	// Verify stored correctly.
+	snap, err := storage.GetSnapshot(db, "default", 1)
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+	if snap.TabCount != 2 {
+		t.Errorf("expected 2 tabs, got %d", snap.TabCount)
+	}
+	if len(snap.Groups) != 1 {
+		t.Errorf("expected 1 group (ungrouped excluded), got %d", len(snap.Groups))
+	}
+}
+
+func TestCreateSkipsWhenNoChanges(t *testing.T) {
+	db := testDB(t)
+
+	session := &types.SessionData{
+		AllTabs: []*types.Tab{
+			{URL: "https://example.com", Title: "Example"},
+		},
+		Profile:  types.Profile{Name: "default"},
+		ParsedAt: time.Now(),
+	}
+
+	// First snapshot.
+	rev1, created1, _, err := Create(db, session, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !created1 || rev1 != 1 {
+		t.Fatalf("expected rev=1, created=true; got rev=%d, created=%v", rev1, created1)
+	}
+
+	// Same tabs — should skip.
+	rev2, created2, _, err := Create(db, session, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created2 {
+		t.Error("expected created=false when no changes")
+	}
+	if rev2 != 1 {
+		t.Errorf("expected rev 1 (latest), got %d", rev2)
+	}
+}
+
+func TestCreateDetectsChanges(t *testing.T) {
+	db := testDB(t)
+
+	session1 := &types.SessionData{
+		AllTabs: []*types.Tab{
+			{URL: "https://a.com", Title: "A"},
+			{URL: "https://b.com", Title: "B"},
+		},
+		Profile:  types.Profile{Name: "default"},
+		ParsedAt: time.Now(),
+	}
+
+	Create(db, session1, "")
+
+	// Add a tab, remove a tab.
+	session2 := &types.SessionData{
+		AllTabs: []*types.Tab{
+			{URL: "https://a.com", Title: "A"},
+			{URL: "https://c.com", Title: "C"},
+		},
+		Profile:  types.Profile{Name: "default"},
+		ParsedAt: time.Now(),
+	}
+
+	rev, created, diff, err := Create(db, session2, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !created {
+		t.Fatal("expected created=true when tabs changed")
+	}
+	if rev != 2 {
+		t.Errorf("expected rev 2, got %d", rev)
+	}
+	if diff == nil {
+		t.Fatal("expected non-nil diff")
+	}
+	if len(diff.Added) != 1 {
+		t.Errorf("expected 1 added, got %d", len(diff.Added))
+	}
+	if len(diff.Removed) != 1 {
+		t.Errorf("expected 1 removed, got %d", len(diff.Removed))
+	}
+}
+
+func TestCreateWithLabel(t *testing.T) {
+	db := testDB(t)
+
+	session := &types.SessionData{
+		AllTabs:  []*types.Tab{{URL: "https://a.com", Title: "A"}},
+		Profile:  types.Profile{Name: "default"},
+		ParsedAt: time.Now(),
+	}
+
+	rev, _, _, err := Create(db, session, "before cleanup")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Verify snapshot was stored correctly.
-	snap, err := storage.GetSnapshot(db, "test-snap")
+	snap, err := storage.GetSnapshot(db, "default", rev)
 	if err != nil {
 		t.Fatalf("GetSnapshot: %v", err)
 	}
-
-	// Should have 3 tabs total.
-	if snap.TabCount != 3 {
-		t.Errorf("expected 3 tabs, got %d", snap.TabCount)
-	}
-
-	// Should have only 1 group (Ungrouped should NOT be stored).
-	if len(snap.Groups) != 1 {
-		t.Fatalf("expected 1 group (Ungrouped excluded), got %d", len(snap.Groups))
-	}
-
-	if snap.Groups[0].Name != "Work" {
-		t.Errorf("expected group name 'Work', got %q", snap.Groups[0].Name)
-	}
-	if snap.Groups[0].FirefoxID != "g1" {
-		t.Errorf("expected group firefox_id 'g1', got %q", snap.Groups[0].FirefoxID)
-	}
-
-	// Verify tabs.
-	if len(snap.Tabs) != 3 {
-		t.Fatalf("expected 3 tabs, got %d", len(snap.Tabs))
-	}
-
-	// Find the pinned tab and verify it.
-	var pinnedFound bool
-	var ungroupedFound bool
-	for _, tab := range snap.Tabs {
-		if tab.URL == "https://example.com" {
-			pinnedFound = true
-			if !tab.Pinned {
-				t.Error("expected example.com tab to be pinned")
-			}
-			if tab.GroupName != "Work" {
-				t.Errorf("expected GroupName 'Work', got %q", tab.GroupName)
-			}
-		}
-		if tab.URL == "https://ungrouped.com" {
-			ungroupedFound = true
-			if tab.GroupName != "" {
-				t.Errorf("expected empty GroupName for ungrouped tab, got %q", tab.GroupName)
-			}
-		}
-	}
-	if !pinnedFound {
-		t.Error("pinned tab (example.com) not found in snapshot")
-	}
-	if !ungroupedFound {
-		t.Error("ungrouped tab not found in snapshot")
-	}
-
-	// Verify profile name.
-	if snap.Profile != "default" {
-		t.Errorf("expected profile 'default', got %q", snap.Profile)
+	if snap.Name != "before cleanup" {
+		t.Errorf("expected label 'before cleanup', got %q", snap.Name)
 	}
 }

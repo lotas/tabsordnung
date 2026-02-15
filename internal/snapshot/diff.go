@@ -16,69 +16,73 @@ type DiffEntry struct {
 	Group string // group name, or empty if ungrouped
 }
 
-// DiffResult holds the result of comparing a snapshot against the current session.
+// DiffResult holds the result of comparing two tab sets.
 type DiffResult struct {
-	SnapshotName string
-	Added        []DiffEntry // in current but not in snapshot
-	Removed      []DiffEntry // in snapshot but not in current
+	RevFrom int // 0 means "current session"
+	RevTo   int // 0 means "current session"
+	Added   []DiffEntry
+	Removed []DiffEntry
 }
 
-// Diff compares a stored snapshot against the current session data.
-// Added entries are tabs present in current but not in the snapshot.
-// Removed entries are tabs present in the snapshot but not in current.
-// Comparison is by URL.
-func Diff(db *sql.DB, snapshotName string, current *types.SessionData) (*DiffResult, error) {
-	snap, err := storage.GetSnapshot(db, snapshotName)
+// DiffAgainstCurrent compares a stored snapshot against current session data.
+// If rev is 0, uses the latest snapshot.
+func DiffAgainstCurrent(db *sql.DB, profile string, rev int, current *types.SessionData) (*DiffResult, error) {
+	var snap *storage.SnapshotFull
+	var err error
+
+	if rev == 0 {
+		snap, err = storage.GetLatestSnapshot(db, profile)
+		if err != nil {
+			return nil, err
+		}
+		if snap == nil {
+			return nil, fmt.Errorf("no snapshots found for profile %q", profile)
+		}
+	} else {
+		snap, err = storage.GetSnapshot(db, profile, rev)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	result := diffSnapshots(snap, current)
+	result.RevFrom = snap.Rev
+	result.RevTo = 0
+	return result, nil
+}
+
+// DiffRevisions compares two stored snapshots.
+func DiffRevisions(db *sql.DB, profile string, rev1, rev2 int) (*DiffResult, error) {
+	snap1, err := storage.GetSnapshot(db, profile, rev1)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load rev %d: %w", rev1, err)
+	}
+	snap2, err := storage.GetSnapshot(db, profile, rev2)
+	if err != nil {
+		return nil, fmt.Errorf("load rev %d: %w", rev2, err)
 	}
 
-	// Build URL set for snapshot tabs.
-	snapshotURLs := make(map[string]DiffEntry, len(snap.Tabs))
-	for _, tab := range snap.Tabs {
-		snapshotURLs[tab.URL] = DiffEntry{
-			URL:   tab.URL,
-			Title: tab.Title,
-			Group: tab.GroupName,
-		}
+	// Build URL maps.
+	urls1 := make(map[string]DiffEntry, len(snap1.Tabs))
+	for _, tab := range snap1.Tabs {
+		urls1[tab.URL] = DiffEntry{URL: tab.URL, Title: tab.Title, Group: tab.GroupName}
+	}
+	urls2 := make(map[string]DiffEntry, len(snap2.Tabs))
+	for _, tab := range snap2.Tabs {
+		urls2[tab.URL] = DiffEntry{URL: tab.URL, Title: tab.Title, Group: tab.GroupName}
 	}
 
-	// Build URL set for current tabs.
-	// Also build a group name lookup from session groups.
-	groupNames := make(map[string]string) // GroupID -> Name
-	for _, g := range current.Groups {
-		if g.ID != "" {
-			groupNames[g.ID] = g.Name
-		}
-	}
+	result := &DiffResult{RevFrom: rev1, RevTo: rev2}
 
-	currentURLs := make(map[string]DiffEntry, len(current.AllTabs))
-	for _, tab := range current.AllTabs {
-		groupName := ""
-		if tab.GroupID != "" {
-			groupName = groupNames[tab.GroupID]
-		}
-		currentURLs[tab.URL] = DiffEntry{
-			URL:   tab.URL,
-			Title: tab.Title,
-			Group: groupName,
-		}
-	}
-
-	result := &DiffResult{
-		SnapshotName: snapshotName,
-	}
-
-	// Added: in current but not in snapshot.
-	for url, entry := range currentURLs {
-		if _, ok := snapshotURLs[url]; !ok {
+	// Added: in rev2 but not rev1.
+	for url, entry := range urls2 {
+		if _, ok := urls1[url]; !ok {
 			result.Added = append(result.Added, entry)
 		}
 	}
-
-	// Removed: in snapshot but not in current.
-	for url, entry := range snapshotURLs {
-		if _, ok := currentURLs[url]; !ok {
+	// Removed: in rev1 but not rev2.
+	for url, entry := range urls1 {
+		if _, ok := urls2[url]; !ok {
 			result.Removed = append(result.Removed, entry)
 		}
 	}
@@ -90,7 +94,11 @@ func Diff(db *sql.DB, snapshotName string, current *types.SessionData) (*DiffRes
 func FormatDiff(d *DiffResult) string {
 	var sb strings.Builder
 
-	fmt.Fprintf(&sb, "Diff against snapshot %q\n", d.SnapshotName)
+	if d.RevTo == 0 {
+		fmt.Fprintf(&sb, "Diff: snapshot #%d vs current\n", d.RevFrom)
+	} else {
+		fmt.Fprintf(&sb, "Diff: snapshot #%d vs #%d\n", d.RevFrom, d.RevTo)
+	}
 	fmt.Fprintf(&sb, "Added: %d  Removed: %d\n", len(d.Added), len(d.Removed))
 
 	if len(d.Added) > 0 {

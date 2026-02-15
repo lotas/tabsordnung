@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,8 +16,6 @@ import (
 	"github.com/lotas/tabsordnung/internal/analyzer"
 	"github.com/lotas/tabsordnung/internal/export"
 	"github.com/lotas/tabsordnung/internal/firefox"
-	"path/filepath"
-
 	"github.com/lotas/tabsordnung/internal/server"
 	"github.com/lotas/tabsordnung/internal/snapshot"
 	"github.com/lotas/tabsordnung/internal/storage"
@@ -118,11 +118,11 @@ Usage:
 
   tabsordnung profiles                                 List Firefox profiles
 
-  tabsordnung snapshot create <name> [--profile X]     Save current tabs
+  tabsordnung snapshot [--profile X] [--label "text"]  Auto-snapshot (only if changed)
   tabsordnung snapshot list                            List saved snapshots
-  tabsordnung snapshot diff <name> [--profile X]       Compare snapshot to current tabs
-  tabsordnung snapshot delete <name> [--yes]           Delete a snapshot
-  tabsordnung snapshot restore <name> [--port N]       Restore tabs via live mode
+  tabsordnung snapshot diff [rev] [rev2] [--profile X] Compare snapshots or current tabs
+  tabsordnung snapshot delete <rev> [--profile X] [--yes]  Delete a snapshot
+  tabsordnung snapshot restore <rev> [--profile X] [--port N]  Restore tabs via live mode
 
   tabsordnung triage                                   Classify GitHub tabs into groups
     --profile <name>       Firefox profile name
@@ -307,9 +307,10 @@ func resolveProfileName(flagValue string) string {
 }
 
 func runSnapshot(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: tabsordnung snapshot <create|list|diff|delete|restore> ...")
-		os.Exit(1)
+	// If no args or first arg is a flag, it's the auto-create flow.
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		runSnapshotCreate(args)
+		return
 	}
 
 	subcmd := args[0]
@@ -317,155 +318,291 @@ func runSnapshot(args []string) {
 
 	switch subcmd {
 	case "create":
-		fs := flag.NewFlagSet("snapshot create", flag.ExitOnError)
-		profileName := fs.String("profile", "", "Firefox profile name")
-		fs.Parse(reorderArgs(subArgs))
-
-		if fs.NArg() < 1 {
-			fmt.Fprintln(os.Stderr, "Usage: tabsordnung snapshot create <name> [--profile name]")
-			os.Exit(1)
-		}
-		name := fs.Arg(0)
-
-		session, err := resolveSession(resolveProfileName(*profileName))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		db, err := openDB()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
-			os.Exit(1)
-		}
-		defer db.Close()
-
-		if err := snapshot.Create(db, name, session); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating snapshot: %v\n", err)
-			os.Exit(1)
-		}
-
+		runSnapshotCreate(subArgs)
 	case "list":
-		db, err := openDB()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
-			os.Exit(1)
-		}
-		defer db.Close()
-
-		snaps, err := storage.ListSnapshots(db)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error listing snapshots: %v\n", err)
-			os.Exit(1)
-		}
-
-		if len(snaps) == 0 {
-			fmt.Println("No snapshots found.")
-			return
-		}
-
-		fmt.Printf("%-40s %5s %8s  %s\n", "NAME", "TABS", "PROFILE", "CREATED")
-		for _, s := range snaps {
-			fmt.Printf("%-40s %5d %8s  %s\n",
-				s.Name,
-				s.TabCount,
-				s.Profile,
-				s.CreatedAt.Format("2006-01-02 15:04"),
-			)
-		}
-
+		runSnapshotList()
 	case "diff":
-		fs := flag.NewFlagSet("snapshot diff", flag.ExitOnError)
-		profileName := fs.String("profile", "", "Firefox profile name")
-		fs.Parse(reorderArgs(subArgs))
-
-		if fs.NArg() < 1 {
-			fmt.Fprintln(os.Stderr, "Usage: tabsordnung snapshot diff <name> [--profile name]")
-			os.Exit(1)
-		}
-		name := fs.Arg(0)
-
-		session, err := resolveSession(resolveProfileName(*profileName))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		db, err := openDB()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
-			os.Exit(1)
-		}
-		defer db.Close()
-
-		result, err := snapshot.Diff(db, name, session)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error computing diff: %v\n", err)
-			os.Exit(1)
-		}
-
-		fmt.Print(snapshot.FormatDiff(result))
-
+		runSnapshotDiff(subArgs)
 	case "delete":
-		fs := flag.NewFlagSet("snapshot delete", flag.ExitOnError)
-		yes := fs.Bool("yes", false, "Skip confirmation prompt")
-		fs.Parse(reorderArgs(subArgs))
+		runSnapshotDelete(subArgs)
+	case "restore":
+		runSnapshotRestore(subArgs)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown snapshot command %q. Use list, diff, delete, or restore.\n", subcmd)
+		os.Exit(1)
+	}
+}
 
-		if fs.NArg() < 1 {
-			fmt.Fprintln(os.Stderr, "Usage: tabsordnung snapshot delete <name> [--yes]")
-			os.Exit(1)
+func runSnapshotCreate(args []string) {
+	fs := flag.NewFlagSet("snapshot", flag.ExitOnError)
+	profileName := fs.String("profile", "", "Firefox profile name")
+	label := fs.String("label", "", "Optional label for the snapshot")
+	fs.Parse(args)
+
+	session, err := resolveSession(resolveProfileName(*profileName))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	rev, created, diff, err := snapshot.Create(db, session, *label)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating snapshot: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !created {
+		fmt.Printf("No changes since snapshot #%d\n", rev)
+		return
+	}
+
+	groups := 0
+	for _, g := range session.Groups {
+		if g.ID != "" {
+			groups++
 		}
-		name := fs.Arg(0)
+	}
+	fmt.Printf("Snapshot #%d created: %d tabs in %d groups\n", rev, len(session.AllTabs), groups)
 
-		if !*yes {
-			fmt.Printf("Delete snapshot %q? [y/N] ", name)
-			reader := bufio.NewReader(os.Stdin)
-			answer, _ := reader.ReadString('\n')
-			answer = strings.TrimSpace(strings.ToLower(answer))
-			if answer != "y" && answer != "yes" {
-				fmt.Println("Aborted.")
-				return
+	if diff != nil && (len(diff.Added) > 0 || len(diff.Removed) > 0) {
+		fmt.Println()
+		if len(diff.Added) > 0 {
+			fmt.Printf("+ Added (%d):\n", len(diff.Added))
+			for _, e := range diff.Added {
+				if e.Group != "" {
+					fmt.Printf("  + %s [%s]\n", e.URL, e.Group)
+				} else {
+					fmt.Printf("  + %s\n", e.URL)
+				}
 			}
 		}
+		if len(diff.Removed) > 0 {
+			if len(diff.Added) > 0 {
+				fmt.Println()
+			}
+			fmt.Printf("- Removed (%d):\n", len(diff.Removed))
+			for _, e := range diff.Removed {
+				if e.Group != "" {
+					fmt.Printf("  - %s [%s]\n", e.URL, e.Group)
+				} else {
+					fmt.Printf("  - %s\n", e.URL)
+				}
+			}
+		}
+	}
+}
 
-		db, err := openDB()
+func runSnapshotList() {
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	snaps, err := storage.ListSnapshots(db)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing snapshots: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(snaps) == 0 {
+		fmt.Println("No snapshots found.")
+		return
+	}
+
+	fmt.Printf("%-5s %5s  %-12s %-20s  %s\n", "REV", "TABS", "PROFILE", "LABEL", "CREATED")
+	for _, s := range snaps {
+		fmt.Printf("%5d %5d  %-12s %-20s  %s\n",
+			s.Rev,
+			s.TabCount,
+			s.Profile,
+			s.Name,
+			s.CreatedAt.Format("2006-01-02 15:04"),
+		)
+	}
+}
+
+func runSnapshotDiff(args []string) {
+	fs := flag.NewFlagSet("snapshot diff", flag.ExitOnError)
+	profileName := fs.String("profile", "", "Firefox profile name")
+	fs.Parse(reorderArgs(args))
+
+	profile := resolveProfileName(*profileName)
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	switch fs.NArg() {
+	case 0:
+		// Diff latest vs current.
+		session, err := resolveSession(profile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		defer db.Close()
-
-		if err := storage.DeleteSnapshot(db, name); err != nil {
-			fmt.Fprintf(os.Stderr, "Error deleting snapshot: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Snapshot %q deleted.\n", name)
-
-	case "restore":
-		fs := flag.NewFlagSet("snapshot restore", flag.ExitOnError)
-		port := fs.Int("port", 19191, "WebSocket port for live mode")
-		fs.Parse(reorderArgs(subArgs))
-
-		if fs.NArg() < 1 {
-			fmt.Fprintln(os.Stderr, "Usage: tabsordnung snapshot restore <name> [--port N]")
-			os.Exit(1)
-		}
-		name := fs.Arg(0)
-
-		db, err := openDB()
+		result, err := snapshot.DiffAgainstCurrent(db, session.Profile.Name, 0, session)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		defer db.Close()
+		fmt.Print(snapshot.FormatDiff(result))
 
-		if err := snapshot.Restore(db, name, *port); err != nil {
-			fmt.Fprintf(os.Stderr, "Error restoring snapshot: %v\n", err)
+	case 1:
+		// Diff specific rev vs current.
+		rev, err := strconv.Atoi(fs.Arg(0))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid revision number: %s\n", fs.Arg(0))
 			os.Exit(1)
 		}
+		session, err := resolveSession(profile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		result, err := snapshot.DiffAgainstCurrent(db, session.Profile.Name, rev, session)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(snapshot.FormatDiff(result))
+
+	case 2:
+		// Diff two revisions.
+		rev1, err := strconv.Atoi(fs.Arg(0))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid revision number: %s\n", fs.Arg(0))
+			os.Exit(1)
+		}
+		rev2, err := strconv.Atoi(fs.Arg(1))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid revision number: %s\n", fs.Arg(1))
+			os.Exit(1)
+		}
+		// For rev-vs-rev diff we need a profile name.
+		resolvedProfile := profile
+		if resolvedProfile == "" {
+			session, err := resolveSession("")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			resolvedProfile = session.Profile.Name
+		}
+		result, err := snapshot.DiffRevisions(db, resolvedProfile, rev1, rev2)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(snapshot.FormatDiff(result))
 
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown snapshot command %q. Use create, list, diff, delete, or restore.\n", subcmd)
+		fmt.Fprintln(os.Stderr, "Usage: tabsordnung snapshot diff [rev] [rev2] [--profile name]")
+		os.Exit(1)
+	}
+}
+
+func runSnapshotDelete(args []string) {
+	fs := flag.NewFlagSet("snapshot delete", flag.ExitOnError)
+	profileName := fs.String("profile", "", "Firefox profile name")
+	yes := fs.Bool("yes", false, "Skip confirmation prompt")
+	fs.Parse(reorderArgs(args))
+
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: tabsordnung snapshot delete <rev> [--profile name] [--yes]")
+		os.Exit(1)
+	}
+
+	rev, err := strconv.Atoi(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid revision number: %s\n", fs.Arg(0))
+		os.Exit(1)
+	}
+
+	// Resolve profile.
+	profile := resolveProfileName(*profileName)
+	if profile == "" {
+		session, err := resolveSession("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		profile = session.Profile.Name
+	}
+
+	if !*yes {
+		fmt.Printf("Delete snapshot #%d? [y/N] ", rev)
+		reader := bufio.NewReader(os.Stdin)
+		answer, _ := reader.ReadString('\n')
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		if answer != "y" && answer != "yes" {
+			fmt.Println("Aborted.")
+			return
+		}
+	}
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := storage.DeleteSnapshot(db, profile, rev); err != nil {
+		fmt.Fprintf(os.Stderr, "Error deleting snapshot: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Snapshot #%d deleted.\n", rev)
+}
+
+func runSnapshotRestore(args []string) {
+	fs := flag.NewFlagSet("snapshot restore", flag.ExitOnError)
+	profileName := fs.String("profile", "", "Firefox profile name")
+	port := fs.Int("port", 19191, "WebSocket port for live mode")
+	fs.Parse(reorderArgs(args))
+
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: tabsordnung snapshot restore <rev> [--profile name] [--port N]")
+		os.Exit(1)
+	}
+
+	rev, err := strconv.Atoi(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid revision number: %s\n", fs.Arg(0))
+		os.Exit(1)
+	}
+
+	// Resolve profile.
+	profile := resolveProfileName(*profileName)
+	if profile == "" {
+		session, err := resolveSession("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		profile = session.Profile.Name
+	}
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := snapshot.Restore(db, profile, rev, *port); err != nil {
+		fmt.Fprintf(os.Stderr, "Error restoring snapshot: %v\n", err)
 		os.Exit(1)
 	}
 }
