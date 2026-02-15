@@ -11,8 +11,33 @@ import (
 
 // DetailModel shows information about the selected item.
 type DetailModel struct {
-	Width  int
-	Height int
+	Width      int
+	Height     int
+	Scroll     int    // scroll offset
+	Content    string // rendered content (cached)
+	ContentLen int    // total lines in content
+}
+
+// ScrollUp adjusts the scroll offset upward.
+func (m *DetailModel) ScrollUp() {
+	if m.Scroll > 0 {
+		m.Scroll--
+	}
+}
+
+// ScrollDown adjusts the scroll offset downward.
+func (m *DetailModel) ScrollDown() {
+	if m.Scroll < m.ContentLen-m.Height {
+		m.Scroll++
+	}
+	if m.Scroll < 0 {
+		m.Scroll = 0
+	}
+}
+
+// ResetScroll resets the scroll offset to 0.
+func (m *DetailModel) ResetScroll() {
+	m.Scroll = 0
 }
 
 func (m DetailModel) ViewTab(tab *types.Tab) string {
@@ -90,6 +115,62 @@ func (m DetailModel) ViewTab(tab *types.Tab) string {
 	}
 
 	return b.String()
+}
+
+// ViewTabWithSummary renders tab info with optional summary content.
+func (m *DetailModel) ViewTabWithSummary(tab *types.Tab, summary string, summarizing bool, summarizeErr string) string {
+	base := m.ViewTab(tab)
+
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
+	activeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+
+	if summarizing {
+		base += "\n" + activeStyle.Render("Summarizing... (fetching & processing)")
+	} else if summary != "" {
+		base += "\n" + labelStyle.Render("Summary") + "\n" + summary
+	} else if summarizeErr != "" {
+		base += "\n" + errStyle.Render("Summarize failed: "+summarizeErr)
+		base += "\n" + dimStyle.Render("  Press 's' to retry")
+	} else {
+		base += "\n" + dimStyle.Render("  Press 's' to summarize")
+	}
+
+	return base
+}
+
+// ViewScrolled applies scroll offset and height truncation to the content string.
+func (m *DetailModel) ViewScrolled(content string) string {
+	if content == "" {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	m.ContentLen = len(lines)
+
+	// Clamp scroll
+	maxScroll := m.ContentLen - m.Height
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.Scroll > maxScroll {
+		m.Scroll = maxScroll
+	}
+	if m.Scroll < 0 {
+		m.Scroll = 0
+	}
+
+	end := m.Scroll + m.Height
+	if end > len(lines) {
+		end = len(lines)
+	}
+
+	if m.Scroll >= len(lines) {
+		return ""
+	}
+
+	return strings.Join(lines[m.Scroll:end], "\n")
 }
 
 func (m DetailModel) ViewGroup(group *types.TabGroup) string {

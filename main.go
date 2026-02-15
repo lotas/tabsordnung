@@ -90,7 +90,22 @@ func main() {
 	// ListenAndServe is only called when the user actually enters live mode.
 	srv := server.New(*port)
 
-	model := tui.NewModel(profiles, *staleDays, *liveMode, srv)
+	// Resolve summarize config
+	resolvedModel := os.Getenv("TABSORDNUNG_MODEL")
+	if resolvedModel == "" {
+		resolvedModel = "llama3.2"
+	}
+	ollamaHost := os.Getenv("OLLAMA_HOST")
+	if ollamaHost == "" {
+		ollamaHost = "http://localhost:11434"
+	}
+	summaryDir := os.Getenv("TABSORDNUNG_SUMMARY_DIR")
+	if summaryDir == "" {
+		home, _ := os.UserHomeDir()
+		summaryDir = filepath.Join(home, ".local", "share", "tabsordnung", "summaries")
+	}
+
+	model := tui.NewModel(profiles, *staleDays, *liveMode, srv, summaryDir, resolvedModel, ollamaHost)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

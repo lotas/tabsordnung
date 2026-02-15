@@ -3,14 +3,20 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lotas/tabsordnung/internal/analyzer"
 	"github.com/lotas/tabsordnung/internal/firefox"
 	"github.com/lotas/tabsordnung/internal/server"
+	"github.com/lotas/tabsordnung/internal/summarize"
 	"github.com/lotas/tabsordnung/internal/types"
 )
 
@@ -23,6 +29,12 @@ type sessionLoadedMsg struct {
 
 type analysisCompleteMsg struct{}
 type githubAnalysisCompleteMsg struct{}
+
+type summarizeCompleteMsg struct {
+	url     string
+	summary string
+	err     error
+}
 
 // SourceMode distinguishes live vs offline.
 type SourceMode int
@@ -41,9 +53,10 @@ type wsTabCreatedMsg struct{ tab *types.Tab }
 type wsTabRemovedMsg struct{ tabID int }
 type wsTabUpdatedMsg struct{ tab *types.Tab }
 type wsCmdResponseMsg struct {
-	id    string
-	ok    bool
-	error string
+	id      string
+	ok      bool
+	error   string
+	content string
 }
 
 // --- Command helpers ---
@@ -57,6 +70,15 @@ func nextCmdID() string {
 func sendCmd(srv *server.Server, msg server.OutgoingMsg) tea.Cmd {
 	return func() tea.Msg {
 		msg.ID = nextCmdID()
+		srv.Send(msg)
+		return nil
+	}
+}
+
+func sendCmdWithID(srv *server.Server, msg server.OutgoingMsg) (string, tea.Cmd) {
+	id := nextCmdID()
+	msg.ID = id
+	return id, func() tea.Msg {
 		srv.Send(msg)
 		return nil
 	}
@@ -97,15 +119,30 @@ type Model struct {
 	showGroupPicker  bool
 	filterPicker     FilterPicker
 	showFilterPicker bool
+
+	// Summarization
+	summaryDir         string
+	ollamaModel        string
+	ollamaHost         string
+	summarizing        bool
+	summarizeErr       string     // last summarize error, cleared on next attempt
+	summarizeContentID string     // pending get-content command ID
+	summarizeTab       *types.Tab // tab awaiting content extraction
+
+	// Focus
+	focusDetail  bool
 }
 
-func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server) Model {
+func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server, summaryDir, ollamaModel, ollamaHost string) Model {
 	m := Model{
-		profiles:  profiles,
-		staleDays: staleDays,
-		selected:  make(map[int]bool),
-		server:    srv,
-		port:      srv.Port(),
+		profiles:    profiles,
+		staleDays:   staleDays,
+		selected:    make(map[int]bool),
+		server:      srv,
+		port:        srv.Port(),
+		summaryDir:  summaryDir,
+		ollamaModel: ollamaModel,
+		ollamaHost:  ollamaHost,
 	}
 	if liveMode {
 		m.mode = ModeLive
@@ -197,6 +234,52 @@ func runGitHubChecks(tabs []*types.Tab) tea.Cmd {
 	}
 }
 
+func runSummarizeTab(tab *types.Tab, outDir, model, host string) tea.Cmd {
+	return func() tea.Msg {
+		title, text, err := summarize.FetchReadable(tab.URL)
+		if err != nil {
+			return summarizeCompleteMsg{url: tab.URL, err: err}
+		}
+		if len(strings.TrimSpace(text)) < 50 {
+			return summarizeCompleteMsg{url: tab.URL, err: fmt.Errorf("not enough readable content")}
+		}
+		if title == "" {
+			title = tab.Title
+		}
+		ctx := context.Background()
+		sum, err := summarize.OllamaSummarize(ctx, model, host, text)
+		if err != nil {
+			return summarizeCompleteMsg{url: tab.URL, err: err}
+		}
+		outPath := summarize.SummaryPath(outDir, tab.URL, tab.Title)
+		os.MkdirAll(filepath.Dir(outPath), 0o755)
+		content := fmt.Sprintf("# %s\n\n**Source:** %s\n**Summarized:** %s\n\n## Summary\n\n%s\n",
+			title, tab.URL, time.Now().Format("2006-01-02"), sum)
+		if err := os.WriteFile(outPath, []byte(content), 0o644); err != nil {
+			return summarizeCompleteMsg{url: tab.URL, err: err}
+		}
+		return summarizeCompleteMsg{url: tab.URL, summary: sum}
+	}
+}
+
+func runSummarizeWithContent(tab *types.Tab, content, outDir, model, host string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		sum, err := summarize.OllamaSummarize(ctx, model, host, content)
+		if err != nil {
+			return summarizeCompleteMsg{url: tab.URL, err: err}
+		}
+		outPath := summarize.SummaryPath(outDir, tab.URL, tab.Title)
+		os.MkdirAll(filepath.Dir(outPath), 0o755)
+		md := fmt.Sprintf("# %s\n\n**Source:** %s\n**Summarized:** %s\n\n## Summary\n\n%s\n",
+			tab.Title, tab.URL, time.Now().Format("2006-01-02"), sum)
+		if err := os.WriteFile(outPath, []byte(md), 0o644); err != nil {
+			return summarizeCompleteMsg{url: tab.URL, err: err}
+		}
+		return summarizeCompleteMsg{url: tab.URL, summary: sum}
+	}
+}
+
 func listenWebSocket(srv *server.Server) tea.Cmd {
 	return func() tea.Msg {
 		for {
@@ -227,7 +310,7 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 				return wsTabUpdatedMsg{tab: tab}
 			default:
 				if msg.ID != "" && msg.OK != nil {
-					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error}
+					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error, content: msg.Content}
 				}
 				// Unknown message type, skip and keep listening
 			}
@@ -253,6 +336,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Tab key toggles focus between tree and detail pane
+		if msg.String() == "tab" {
+			if m.session != nil && !m.showPicker && !m.showGroupPicker && !m.showFilterPicker {
+				m.focusDetail = !m.focusDetail
+				if !m.focusDetail {
+					m.detail.Scroll = 0
+				}
+				return m, nil
+			}
+		}
+
+		// Detail pane focus mode
+		if m.focusDetail {
+			switch msg.String() {
+			case "tab":
+				m.focusDetail = false
+				m.detail.Scroll = 0
+				return m, nil
+			case "j", "down":
+				m.detail.ScrollDown()
+				return m, nil
+			case "k", "up":
+				m.detail.ScrollUp()
+				return m, nil
+			case "s":
+				return m, nil // handled below in main key handler
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+
 		// Group picker mode
 		if m.showGroupPicker {
 			switch msg.String() {
@@ -363,6 +478,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tree.CollapseOrParent()
 		case "l":
 			m.tree.ExpandOrEnter()
+		case "s":
+			node := m.tree.SelectedNode()
+			if node != nil && node.Tab != nil && !m.summarizing {
+				m.summarizing = true
+				m.summarizeErr = ""
+				if m.mode == ModeLive && m.connected {
+					id, cmd := sendCmdWithID(m.server, server.OutgoingMsg{
+						Action: "get-content",
+						TabID:  node.Tab.BrowserID,
+					})
+					m.summarizeContentID = id
+					m.summarizeTab = node.Tab
+					return m, cmd
+				}
+				return m, runSummarizeTab(node.Tab, m.summaryDir, m.ollamaModel, m.ollamaHost)
+			}
 		case "f":
 			m.showFilterPicker = true
 			m.filterPicker = NewFilterPicker(m.tree.Filter)
@@ -469,6 +600,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.stats = analyzer.ComputeStats(m.session)
 		return m, nil
 
+	case summarizeCompleteMsg:
+		m.summarizing = false
+		if msg.err != nil {
+			m.summarizeErr = msg.err.Error()
+		} else {
+			m.summarizeErr = ""
+		}
+		return m, nil
+
 	case wsSnapshotMsg:
 		m.loading = false
 		m.connected = true
@@ -490,6 +630,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wsDisconnectedMsg:
 		m.connected = false
+		if m.summarizeContentID != "" && m.summarizeTab != nil {
+			tab := m.summarizeTab
+			m.summarizeContentID = ""
+			m.summarizeTab = nil
+			if m.mode == ModeLive && m.server != nil {
+				return m, tea.Batch(
+					listenWebSocket(m.server),
+					runSummarizeTab(tab, m.summaryDir, m.ollamaModel, m.ollamaHost),
+				)
+			}
+		}
 		if m.mode == ModeLive && m.server != nil {
 			return m, listenWebSocket(m.server)
 		}
@@ -525,6 +676,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, listenWebSocket(m.server)
 
 	case wsCmdResponseMsg:
+		if m.summarizeContentID != "" && msg.id == m.summarizeContentID {
+			tab := m.summarizeTab
+			m.summarizeContentID = ""
+			m.summarizeTab = nil
+			content := strings.TrimSpace(msg.content)
+			if msg.ok && len(content) >= 50 {
+				return m, tea.Batch(
+					listenWebSocket(m.server),
+					runSummarizeWithContent(tab, content, m.summaryDir, m.ollamaModel, m.ollamaHost),
+				)
+			}
+			// Fallback to HTTP fetch
+			return m, tea.Batch(
+				listenWebSocket(m.server),
+				runSummarizeTab(tab, m.summaryDir, m.ollamaModel, m.ollamaHost),
+			)
+		}
 		return m, listenWebSocket(m.server)
 	}
 
@@ -543,6 +711,7 @@ func (m *Model) rebuildTree() {
 	m.tree.Height = m.height - 5
 	m.tree.Filter = oldFilter
 	m.tree.SavedExpanded = oldSavedExpanded
+	m.tree.SummaryDir = m.summaryDir
 
 	// Restore expanded state from before rebuild
 	if oldExpanded != nil {
@@ -692,6 +861,9 @@ func (m Model) View() string {
 	if m.githubChecking {
 		statsStr += " · checking github..."
 	}
+	if m.summarizing {
+		statsStr += " · summarizing..."
+	}
 	topBar := topBarStyle.Render(profileStr + "  " + statsStr)
 
 	// Filter indicator
@@ -699,15 +871,22 @@ func (m Model) View() string {
 	filterStr := fmt.Sprintf("[filter: %s]", filterNames[m.tree.Filter])
 
 	// Panes
+	treeBorderColor := "62"
+	detailBorderColor := "240"
+	if m.focusDetail {
+		treeBorderColor = "240"
+		detailBorderColor = "62"
+	}
+
 	treeBorder := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
+		BorderForeground(lipgloss.Color(treeBorderColor)).
 		Width(m.tree.Width).
 		Height(m.tree.Height)
 
 	detailBorder := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240")).
+		BorderForeground(lipgloss.Color(detailBorderColor)).
 		Width(m.detail.Width).
 		Height(m.detail.Height)
 
@@ -715,11 +894,27 @@ func (m Model) View() string {
 	var detailContent string
 	if node := m.tree.SelectedNode(); node != nil {
 		if node.Tab != nil {
-			detailContent = m.detail.ViewTab(node.Tab)
+			// Check for existing summary
+			var summaryText string
+			sumPath := summarize.SummaryPath(m.summaryDir, node.Tab.URL, node.Tab.Title)
+			if raw, err := summarize.ReadSummary(sumPath); err == nil {
+				// Render with glamour
+				r, _ := glamour.NewTermRenderer(
+					glamour.WithStylePath("dark"),
+					glamour.WithWordWrap(m.detail.Width-2),
+				)
+				if rendered, err := r.Render(raw); err == nil {
+					summaryText = rendered
+				} else {
+					summaryText = raw
+				}
+			}
+			detailContent = m.detail.ViewTabWithSummary(node.Tab, summaryText, m.summarizing, m.summarizeErr)
 		} else if node.Group != nil {
 			detailContent = m.detail.ViewGroup(node.Group)
 		}
 	}
+	detailContent = m.detail.ViewScrolled(detailContent)
 
 	m.tree.Selected = m.selected
 	left := treeBorder.Render(m.tree.View())
@@ -736,7 +931,7 @@ func (m Model) View() string {
 		}
 		bottomText += "space select \u00b7 enter focus \u00b7 "
 	}
-	bottomText += "\u2191\u2193/jk navigate \u00b7 h/l collapse/expand \u00b7 f filter \u00b7 r refresh \u00b7 1-9 source \u00b7 q quit  " + filterStr
+	bottomText += "\u2191\u2193/jk navigate \u00b7 h/l collapse/expand \u00b7 tab focus \u00b7 s summarize \u00b7 f filter \u00b7 r refresh \u00b7 1-9 source \u00b7 q quit  " + filterStr
 	bottomBar := bottomBarStyle.Render(bottomText)
 
 	return lipgloss.JoinVertical(lipgloss.Left, topBar, panes, bottomBar)

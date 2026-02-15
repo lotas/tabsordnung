@@ -3,6 +3,7 @@ package summarize
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,6 +42,36 @@ func sanitizeFilename(title string) string {
 	return s
 }
 
+// SummaryPath returns the file path for a tab summary, organized by domain subfolder.
+func SummaryPath(outDir, rawURL, title string) string {
+	host := "unknown"
+	if u, err := url.Parse(rawURL); err == nil && u.Hostname() != "" {
+		host = strings.ToLower(u.Hostname())
+		host = nonAlphanumeric.ReplaceAllString(host, "-")
+		host = strings.Trim(host, "-")
+		if host == "" {
+			host = "unknown"
+		}
+	}
+	return filepath.Join(outDir, host, sanitizeFilename(title)+".md")
+}
+
+// ReadSummary reads a summary markdown file and returns the summary text
+// (everything after the "## Summary\n\n" marker). If the marker is not found,
+// the full content is returned. Returns an error if the file cannot be read.
+func ReadSummary(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	content := string(data)
+	const marker = "## Summary\n\n"
+	if idx := strings.Index(content, marker); idx >= 0 {
+		return content[idx+len(marker):], nil
+	}
+	return content, nil
+}
+
 // findGroup returns the first group matching the given name, or nil.
 func findGroup(session *types.SessionData, name string) *types.TabGroup {
 	for _, g := range session.Groups {
@@ -63,10 +94,6 @@ func Run(cfg Config) error {
 		return nil
 	}
 
-	if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
-	}
-
 	fmt.Fprintf(os.Stderr, "Summarizing %d tabs from %q:\n", len(group.Tabs), cfg.GroupName)
 	for i, tab := range group.Tabs {
 		fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, tab.Title)
@@ -79,8 +106,13 @@ func Run(cfg Config) error {
 	for i, tab := range group.Tabs {
 		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, len(group.Tabs), tab.Title)
 
-		filename := sanitizeFilename(tab.Title) + ".md"
-		outPath := filepath.Join(cfg.OutDir, filename)
+		outPath := SummaryPath(cfg.OutDir, tab.URL, tab.Title)
+
+		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "        ✗ mkdir: %v\n", err)
+			errCount++
+			continue
+		}
 
 		// Dedup: skip if file already exists.
 		if _, err := os.Stat(outPath); err == nil {
@@ -130,7 +162,7 @@ func Run(cfg Config) error {
 			continue
 		}
 
-		fmt.Fprintf(os.Stderr, "        ✓ saved %s\n", filename)
+		fmt.Fprintf(os.Stderr, "        ✓ saved %s\n", outPath)
 		newCount++
 	}
 

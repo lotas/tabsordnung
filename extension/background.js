@@ -112,6 +112,14 @@ async function handleCommand(msg) {
         const tab = await browser.tabs.get(msg.tabId);
         await browser.windows.update(tab.windowId, { focused: true });
         break;
+      case "get-content": {
+        const results = await browser.scripting.executeScript({
+          target: { tabId: msg.tabId },
+          func: () => document.body?.innerText || "",
+        });
+        send({ id: msg.id, ok: true, content: results?.[0]?.result || "" });
+        return;
+      }
       case "move":
         if (browser.tabs.group) {
           await browser.tabs.group({ tabIds: msg.tabIds, groupId: msg.groupId });

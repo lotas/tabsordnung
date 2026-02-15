@@ -24,6 +24,7 @@ type IncomingMsg struct {
 	OK      *bool  `json:"ok,omitempty"`
 	Error   string `json:"error,omitempty"`
 	GroupID int    `json:"groupId,omitempty"`
+	Content string `json:"content,omitempty"`
 }
 
 // TabToOpen specifies a tab to create in the browser.

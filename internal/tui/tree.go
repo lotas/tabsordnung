@@ -2,9 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/lotas/tabsordnung/internal/summarize"
 	"github.com/lotas/tabsordnung/internal/types"
 )
 
@@ -20,6 +22,7 @@ type TreeModel struct {
 	Expanded      map[string]bool // group ID -> expanded
 	SavedExpanded map[string]bool // snapshot before filter override
 	Selected      map[int]bool    // BrowserID -> selected
+	SummaryDir    string          // path to summaries directory
 	Cursor        int
 	Offset        int // scroll offset
 	Width         int
@@ -219,11 +222,12 @@ func (m TreeModel) View() string {
 	}
 
 	cursorStyle := lipgloss.NewStyle().Bold(true).Reverse(true)
-	staleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))  // orange
-	deadStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))   // red
-	dupStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33"))     // blue
-	ghDoneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))  // green
-	ghOpenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("135")) // purple
+	staleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))    // orange
+	deadStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))     // red
+	dupStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33"))       // blue
+	ghDoneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))    // green
+	ghOpenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("135"))   // purple
+	summaryStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")) // cyan
 	groupStyle := lipgloss.NewStyle().Bold(true)
 
 	for i := m.Offset; i < end; i++ {
@@ -267,6 +271,12 @@ func (m TreeModel) View() string {
 				markers = append(markers, ghDoneStyle.Render("✓"))
 			} else if node.Tab.GitHubStatus == "open" {
 				markers = append(markers, ghOpenStyle.Render("○"))
+			}
+			if m.SummaryDir != "" {
+				sumPath := summarize.SummaryPath(m.SummaryDir, node.Tab.URL, node.Tab.Title)
+				if _, err := os.Stat(sumPath); err == nil {
+					markers = append(markers, summaryStyle.Render("S"))
+				}
 			}
 
 			marker := ""

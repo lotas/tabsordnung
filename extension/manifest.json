@@ -3,7 +3,8 @@
   "name": "Tabsordnung Companion",
   "version": "0.1.0",
   "description": "Connects Firefox tabs to the Tabsordnung TUI",
-  "permissions": ["tabs", "tabGroups"],
+  "permissions": ["tabs", "tabGroups", "scripting"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "scripts": ["background.js"]
   },
