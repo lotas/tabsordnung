@@ -18,16 +18,17 @@ type TreeNode struct {
 
 // TreeModel manages the collapsible tree view.
 type TreeModel struct {
-	Groups        []*types.TabGroup
-	Expanded      map[string]bool // group ID -> expanded
-	SavedExpanded map[string]bool // snapshot before filter override
-	Selected      map[int]bool    // BrowserID -> selected
-	SummaryDir    string          // path to summaries directory
-	Cursor        int
-	Offset        int // scroll offset
-	Width         int
-	Height        int
-	Filter        types.FilterMode
+	Groups           []*types.TabGroup
+	Expanded         map[string]bool // group ID -> expanded
+	SavedExpanded    map[string]bool // snapshot before filter override
+	Selected         map[int]bool    // BrowserID -> selected
+	SummarizingURLs  map[string]bool // URL -> actively summarizing
+	SummaryDir       string          // path to summaries directory
+	Cursor           int
+	Offset           int // scroll offset
+	Width            int
+	Height           int
+	Filter           types.FilterMode
 }
 
 func NewTreeModel(groups []*types.TabGroup) TreeModel {
@@ -241,7 +242,8 @@ func (m TreeModel) View() string {
 	dupStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33"))       // blue
 	ghDoneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))    // green
 	ghOpenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("135"))   // purple
-	summaryStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("cyan")) // cyan
+	summaryStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51"))        // cyan
+	summarizingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // yellow
 	groupStyle := lipgloss.NewStyle().Bold(true)
 
 	for i := m.Offset; i < end; i++ {
@@ -286,7 +288,9 @@ func (m TreeModel) View() string {
 			} else if node.Tab.GitHubStatus == "open" {
 				markers = append(markers, ghOpenStyle.Render("○"))
 			}
-			if m.SummaryDir != "" {
+			if m.SummarizingURLs[node.Tab.URL] {
+				markers = append(markers, summarizingStyle.Render("⟳"))
+			} else if m.SummaryDir != "" {
 				sumPath := summarize.SummaryPath(m.SummaryDir, node.Tab.URL, node.Tab.Title)
 				if _, err := os.Stat(sumPath); err == nil {
 					markers = append(markers, summaryStyle.Render("S"))

@@ -84,6 +84,12 @@ func sendCmdWithID(srv *server.Server, msg server.OutgoingMsg) (string, tea.Cmd)
 	}
 }
 
+// SummarizeJob tracks a single in-flight summarization.
+type SummarizeJob struct {
+	Tab       *types.Tab
+	ContentID string // non-empty = waiting for browser content (live mode)
+}
+
 // --- Model ---
 
 type Model struct {
@@ -121,13 +127,11 @@ type Model struct {
 	showFilterPicker bool
 
 	// Summarization
-	summaryDir         string
-	ollamaModel        string
-	ollamaHost         string
-	summarizing        bool
-	summarizeErr       string     // last summarize error, cleared on next attempt
-	summarizeContentID string     // pending get-content command ID
-	summarizeTab       *types.Tab // tab awaiting content extraction
+	summaryDir       string
+	ollamaModel      string
+	ollamaHost       string
+	summarizeJobs    map[string]*SummarizeJob // URL → active job
+	summarizeErrors  map[string]string        // URL → error message (persists after job, cleared on retry)
 
 	// Focus
 	focusDetail  bool
@@ -135,14 +139,16 @@ type Model struct {
 
 func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server, summaryDir, ollamaModel, ollamaHost string) Model {
 	m := Model{
-		profiles:    profiles,
-		staleDays:   staleDays,
-		selected:    make(map[int]bool),
-		server:      srv,
-		port:        srv.Port(),
-		summaryDir:  summaryDir,
-		ollamaModel: ollamaModel,
-		ollamaHost:  ollamaHost,
+		profiles:        profiles,
+		staleDays:       staleDays,
+		selected:        make(map[int]bool),
+		server:          srv,
+		port:            srv.Port(),
+		summaryDir:      summaryDir,
+		ollamaModel:     ollamaModel,
+		ollamaHost:      ollamaHost,
+		summarizeJobs:   make(map[string]*SummarizeJob),
+		summarizeErrors: make(map[string]string),
 	}
 	if liveMode {
 		m.mode = ModeLive
@@ -480,16 +486,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tree.ExpandOrEnter()
 		case "s":
 			node := m.tree.SelectedNode()
-			if node != nil && node.Tab != nil && !m.summarizing {
-				m.summarizing = true
-				m.summarizeErr = ""
+			if node != nil && node.Tab != nil {
+				url := node.Tab.URL
+				if _, exists := m.summarizeJobs[url]; exists {
+					break // already in progress
+				}
+				delete(m.summarizeErrors, url)
+				job := &SummarizeJob{Tab: node.Tab}
+				m.summarizeJobs[url] = job
 				if m.mode == ModeLive && m.connected {
 					id, cmd := sendCmdWithID(m.server, server.OutgoingMsg{
 						Action: "get-content",
 						TabID:  node.Tab.BrowserID,
 					})
-					m.summarizeContentID = id
-					m.summarizeTab = node.Tab
+					job.ContentID = id
 					return m, cmd
 				}
 				return m, runSummarizeTab(node.Tab, m.summaryDir, m.ollamaModel, m.ollamaHost)
@@ -606,11 +616,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case summarizeCompleteMsg:
-		m.summarizing = false
+		delete(m.summarizeJobs, msg.url)
 		if msg.err != nil {
-			m.summarizeErr = msg.err.Error()
+			m.summarizeErrors[msg.url] = msg.err.Error()
 		} else {
-			m.summarizeErr = ""
+			delete(m.summarizeErrors, msg.url)
 		}
 		return m, nil
 
@@ -635,19 +645,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wsDisconnectedMsg:
 		m.connected = false
-		if m.summarizeContentID != "" && m.summarizeTab != nil {
-			tab := m.summarizeTab
-			m.summarizeContentID = ""
-			m.summarizeTab = nil
-			if m.mode == ModeLive && m.server != nil {
-				return m, tea.Batch(
-					listenWebSocket(m.server),
-					runSummarizeTab(tab, m.summaryDir, m.ollamaModel, m.ollamaHost),
-				)
+		var cmds []tea.Cmd
+		for _, job := range m.summarizeJobs {
+			if job.ContentID != "" {
+				job.ContentID = ""
+				cmds = append(cmds, runSummarizeTab(job.Tab, m.summaryDir, m.ollamaModel, m.ollamaHost))
 			}
 		}
 		if m.mode == ModeLive && m.server != nil {
-			return m, listenWebSocket(m.server)
+			cmds = append(cmds, listenWebSocket(m.server))
+		}
+		if len(cmds) > 0 {
+			return m, tea.Batch(cmds...)
 		}
 		return m, nil
 
@@ -681,22 +690,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, listenWebSocket(m.server)
 
 	case wsCmdResponseMsg:
-		if m.summarizeContentID != "" && msg.id == m.summarizeContentID {
-			tab := m.summarizeTab
-			m.summarizeContentID = ""
-			m.summarizeTab = nil
-			content := strings.TrimSpace(msg.content)
-			if msg.ok && len(content) >= 50 {
+		// Check if this response matches a summarize job
+		for _, job := range m.summarizeJobs {
+			if job.ContentID != "" && job.ContentID == msg.id {
+				tab := job.Tab
+				job.ContentID = ""
+				content := strings.TrimSpace(msg.content)
+				if msg.ok && len(content) >= 50 {
+					return m, tea.Batch(
+						listenWebSocket(m.server),
+						runSummarizeWithContent(tab, content, m.summaryDir, m.ollamaModel, m.ollamaHost),
+					)
+				}
+				// Fallback to HTTP fetch
 				return m, tea.Batch(
 					listenWebSocket(m.server),
-					runSummarizeWithContent(tab, content, m.summaryDir, m.ollamaModel, m.ollamaHost),
+					runSummarizeTab(tab, m.summaryDir, m.ollamaModel, m.ollamaHost),
 				)
 			}
-			// Fallback to HTTP fetch
-			return m, tea.Batch(
-				listenWebSocket(m.server),
-				runSummarizeTab(tab, m.summaryDir, m.ollamaModel, m.ollamaHost),
-			)
 		}
 		return m, listenWebSocket(m.server)
 	}
@@ -866,8 +877,10 @@ func (m Model) View() string {
 	if m.githubChecking {
 		statsStr += " · checking github..."
 	}
-	if m.summarizing {
-		statsStr += " · summarizing..."
+	if n := len(m.summarizeJobs); n == 1 {
+		statsStr += " · summarizing 1 tab..."
+	} else if n > 1 {
+		statsStr += fmt.Sprintf(" · summarizing %d tabs...", n)
 	}
 	topBar := topBarStyle.Render(profileStr + "  " + statsStr)
 
@@ -914,7 +927,9 @@ func (m Model) View() string {
 					summaryText = raw
 				}
 			}
-			detailContent = m.detail.ViewTabWithSummary(node.Tab, summaryText, m.summarizing, m.summarizeErr)
+			_, isSummarizing := m.summarizeJobs[node.Tab.URL]
+			tabErr := m.summarizeErrors[node.Tab.URL]
+			detailContent = m.detail.ViewTabWithSummary(node.Tab, summaryText, isSummarizing, tabErr)
 		} else if node.Group != nil {
 			detailContent = m.detail.ViewGroup(node.Group)
 		}
@@ -922,6 +937,11 @@ func (m Model) View() string {
 	detailContent = m.detail.ViewScrolled(detailContent)
 
 	m.tree.Selected = m.selected
+	summarizingURLs := make(map[string]bool, len(m.summarizeJobs))
+	for url := range m.summarizeJobs {
+		summarizingURLs[url] = true
+	}
+	m.tree.SummarizingURLs = summarizingURLs
 	left := treeBorder.Render(m.tree.View())
 	right := detailBorder.Render(detailContent)
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
