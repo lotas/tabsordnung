@@ -21,7 +21,7 @@ go install github.com/lotas/tabsordnung@latest
 
 ## Disclaimer
 
-This project is provided as-is. It works for the use cases covered by current tests and development workflows, but it is not guaranteed to handle every Firefox/session scenario.
+This software is provided "as-is". The author is not responsible for any account-level consequences or service disruptions resulting from the use of the activity scraping feature.
 
 ## Usage
 
@@ -122,3 +122,17 @@ Install the companion Firefox extension from the `extension/` directory. The ext
 ## Supported platforms
 
 Linux and macOS. Requires Firefox profile data on disk.
+
+## Ethics & Responsible Use
+
+Tabsordnung is designed to respect the privacy of your data and the stability of the services it interacts with.
+
+### Personal Use & Privacy
+- **Local Only:** All activity signals (Slack, Gmail, Matrix) are processed entirely on your local machine. No data is ever transmitted to external servers or third-party APIs.
+- **No Credentials:** The extension leverages your existing, active browser session. It does not see, store, or require your passwords or auth tokens.
+
+### Respecting Service Boundaries
+While the activity signal feature is designed to enhance personal productivity, please be aware of the following:
+- **Terms of Service:** Automating interactions with web services (even locally) often falls outside of their standard Terms of Service. Use this feature at your own discretion; the primary risk is automated detection leading to temporary account flags or suspension.
+- **Minimal Impact:** To minimize footprint, the extension only queries notification counts on-demand and targets specific DOM elements rather than full page content.
+- **Educational Intent:** This feature is a proof-of-concept for local browser-to-TUI integration. If you require a production-grade solution for team workflows, please use official APIs.
