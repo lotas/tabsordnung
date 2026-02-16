@@ -59,7 +59,7 @@ function renderTabInfo(data) {
 
   // Summary
   if (data.summary) {
-    $("#summary-content").textContent = data.summary;
+    $("#summary-content").innerHTML = marked.parse(data.summary);
     $("#summary-content").classList.remove("hidden");
   } else {
     $("#summary-none").classList.remove("hidden");
@@ -123,7 +123,7 @@ async function summarizeTab() {
   $("#summary-spinner").classList.add("hidden");
 
   if (response && response.summary) {
-    $("#summary-content").textContent = response.summary;
+    $("#summary-content").innerHTML = marked.parse(response.summary);
     $("#summary-content").classList.remove("hidden");
   } else {
     const errMsg = (response && response.error) || "Summarization failed";

@@ -134,9 +134,37 @@ body {
   font-size: 15px;
   line-height: 1.5;
   color: #ccc;
-  white-space: pre-wrap;
   max-height: 400px;
   overflow-y: auto;
+}
+
+#summary-content h1,
+#summary-content h2,
+#summary-content h3 {
+  color: #fff;
+  margin: 8px 0 4px;
+  font-size: 15px;
+}
+
+#summary-content p {
+  margin: 4px 0;
+}
+
+#summary-content ul,
+#summary-content ol {
+  padding-left: 20px;
+  margin: 4px 0;
+}
+
+#summary-content code {
+  background: #2a2a3a;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 13px;
+}
+
+#summary-content a {
+  color: #4a90d9;
 }
 
 #summary-spinner {
