@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/lotas/tabsordnung/internal/signal"
 	"github.com/lotas/tabsordnung/internal/summarize"
 	"github.com/lotas/tabsordnung/internal/types"
 )
@@ -24,6 +25,7 @@ type TreeModel struct {
 	Selected         map[int]bool    // BrowserID -> selected
 	SummarizingURLs  map[string]bool // URL -> actively summarizing
 	SummaryDir       string          // path to summaries directory
+	SignalCounts     map[string]int  // source -> active signal count
 	Cursor           int
 	Offset           int // scroll offset
 	Width            int
@@ -244,6 +246,7 @@ func (m TreeModel) View() string {
 	ghOpenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("135"))   // purple
 	summaryStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51"))        // cyan
 	summarizingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // yellow
+	signalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))       // yellow
 	groupStyle := lipgloss.NewStyle().Bold(true)
 
 	for i := m.Offset; i < end; i++ {
@@ -294,6 +297,11 @@ func (m TreeModel) View() string {
 				sumPath := summarize.SummaryPath(m.SummaryDir, node.Tab.URL, node.Tab.Title)
 				if _, err := os.Stat(sumPath); err == nil {
 					markers = append(markers, summaryStyle.Render("S"))
+				}
+			}
+			if src := signal.DetectSource(node.Tab.URL); src != "" {
+				if n := m.SignalCounts[src]; n > 0 {
+					markers = append(markers, signalStyle.Render(fmt.Sprintf("⚡%d", n)))
 				}
 			}
 

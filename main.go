@@ -116,7 +116,7 @@ func main() {
 	defer db.Close()
 
 	model := tui.NewModel(profiles, *staleDays, *liveMode, srv, summaryDir, resolvedModel, ollamaHost, db)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

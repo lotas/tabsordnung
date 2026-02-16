@@ -44,6 +44,8 @@ type signalCompleteMsg struct {
 	err    error
 }
 
+type signalPollTickMsg struct{}
+
 type signalActionMsg struct {
 	source string
 	err    error
@@ -334,6 +336,48 @@ func (m *Model) processNextSignal() tea.Cmd {
 	return cmd
 }
 
+const signalPollInterval = 5 * time.Minute
+
+func signalPollTick() tea.Cmd {
+	return tea.Tick(signalPollInterval, func(time.Time) tea.Msg {
+		return signalPollTickMsg{}
+	})
+}
+
+// queueSignalPoll walks all tabs, picks one tab per signal source, and queues
+// signal jobs for sources that aren't already queued or active.
+func (m *Model) queueSignalPoll() tea.Cmd {
+	if m.session == nil || !m.connected {
+		return signalPollTick()
+	}
+
+	// Collect one tab per source.
+	sourceTabs := make(map[string]*types.Tab)
+	for _, tab := range m.session.AllTabs {
+		src := signal.DetectSource(tab.URL)
+		if src == "" {
+			continue
+		}
+		if _, ok := sourceTabs[src]; !ok {
+			sourceTabs[src] = tab
+		}
+	}
+
+	// Skip sources already in queue or active.
+	if m.signalActive != nil {
+		delete(sourceTabs, m.signalActive.Source)
+	}
+	for _, j := range m.signalQueue {
+		delete(sourceTabs, j.Source)
+	}
+
+	for src, tab := range sourceTabs {
+		m.signalQueue = append(m.signalQueue, &SignalJob{Tab: tab, Source: src})
+	}
+
+	return tea.Batch(m.processNextSignal(), signalPollTick())
+}
+
 func runReconcileSignals(db *sql.DB, source string, items []signal.SignalItem, capturedAt time.Time) tea.Cmd {
 	return func() tea.Msg {
 		records := make([]storage.SignalRecord, len(items))
@@ -421,6 +465,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.picker.Height = m.height
 		return m, nil
 
+	case tea.MouseMsg:
+		// Determine which pane the mouse is over based on X position.
+		// Tree pane occupies roughly 0..treeWidth, detail pane is the rest.
+		treeWidth := m.width * 60 / 100
+		onDetail := msg.X > treeWidth+1
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			if onDetail {
+				m.detail.ScrollUp()
+			} else {
+				m.tree.MoveUp()
+				m.detail.Scroll = 0
+				m.refreshSignals()
+			}
+		case tea.MouseButtonWheelDown:
+			if onDetail {
+				m.detail.ScrollDown()
+			} else {
+				m.tree.MoveDown()
+				m.detail.Scroll = 0
+				m.refreshSignals()
+			}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		// Tab key toggles focus between tree and detail pane
 		if msg.String() == "tab" {
@@ -442,11 +511,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.signalCursor < len(m.signals)-1 {
 						m.signalCursor++
 					}
+					m.scrollDetailToSignalCursor()
 					return m, nil
 				case "k", "up":
 					if m.signalCursor > 0 {
 						m.signalCursor--
 					}
+					m.scrollDetailToSignalCursor()
 					return m, nil
 				case "x":
 					sig := m.signals[m.signalCursor]
@@ -786,6 +857,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.signalSource != "" {
 			m.signals, _ = storage.ListSignals(m.db, m.signalSource, true)
 		}
+		m.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
 		return m, m.processNextSignal()
 
 	case signalActionMsg:
@@ -802,7 +874,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.signalCursor = 0
 			}
 		}
+		m.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
 		return m, nil
+
+	case signalPollTickMsg:
+		return m, m.queueSignalPoll()
 
 	case wsSnapshotMsg:
 		m.loading = false
@@ -821,6 +897,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			runDeadLinkChecks(m.session.AllTabs),
 			runGitHubChecks(m.session.AllTabs),
 			listenWebSocket(m.server),
+			signalPollTick(),
 		)
 
 	case wsDisconnectedMsg:
@@ -923,6 +1000,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// scrollDetailToSignalCursor adjusts detail pane scroll so the signal cursor is visible.
+// Signal items start after the tab info header in the rendered content.
+// We estimate the line offset: ViewTab produces ~8 lines, then header + blank = 2 more,
+// then 1 line per signal.
+func (m *Model) scrollDetailToSignalCursor() {
+	headerLines := 10 // approximate lines before signal list items
+	cursorLine := headerLines + m.signalCursor
+	if cursorLine < m.detail.Scroll {
+		m.detail.Scroll = cursorLine
+	} else if cursorLine >= m.detail.Scroll+m.detail.Height-1 {
+		m.detail.Scroll = cursorLine - m.detail.Height + 2
+	}
+	if m.detail.Scroll < 0 {
+		m.detail.Scroll = 0
+	}
+}
+
 func (m *Model) refreshSignals() {
 	node := m.tree.SelectedNode()
 	var source string
@@ -953,6 +1047,9 @@ func (m *Model) rebuildTree() {
 	m.tree.Filter = oldFilter
 	m.tree.SavedExpanded = oldSavedExpanded
 	m.tree.SummaryDir = m.summaryDir
+	if m.db != nil {
+		m.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
+	}
 
 	// Restore expanded state from before rebuild
 	if oldExpanded != nil {
@@ -1135,7 +1232,8 @@ func (m Model) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(detailBorderColor)).
 		Width(m.detail.Width).
-		Height(m.detail.Height)
+		Height(m.detail.Height).
+		MaxHeight(m.detail.Height + 2) // +2 for border lines
 
 	// Render detail based on selection
 	var detailContent string

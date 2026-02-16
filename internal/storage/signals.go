@@ -73,6 +73,25 @@ func ListSignals(db *sql.DB, source string, includeCompleted bool) ([]SignalReco
 	return result, rows.Err()
 }
 
+// ActiveSignalCounts returns the number of active (non-completed) signals per source.
+func ActiveSignalCounts(db *sql.DB) (map[string]int, error) {
+	rows, err := db.Query(`SELECT source, COUNT(*) FROM signals WHERE completed_at IS NULL GROUP BY source`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]int)
+	for rows.Next() {
+		var source string
+		var count int
+		if err := rows.Scan(&source, &count); err != nil {
+			return nil, err
+		}
+		counts[source] = count
+	}
+	return counts, rows.Err()
+}
+
 // CompleteSignal marks a signal as manually completed. Clears pinned flag.
 func CompleteSignal(db *sql.DB, id int64) error {
 	res, err := db.Exec(

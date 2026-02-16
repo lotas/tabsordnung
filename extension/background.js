@@ -175,20 +175,17 @@ async function handleCommand(msg) {
             });
           },
           slack: () => {
-            const unreads = document.querySelectorAll(".p-channel_sidebar__link--unread .p-channel_sidebar__name");
-            if (unreads.length > 0) {
-              return Array.from(unreads).slice(0, 20).map(el => ({
-                title: el.textContent?.trim() || "",
-                preview: "unread channel",
-                timestamp: "",
-              }));
-            }
-            const msgs = document.querySelectorAll("[data-qa='virtual-list-item'] .c-message_kit__text");
-            return Array.from(msgs).slice(-20).map(el => ({
-              title: "",
-              preview: el.textContent?.trim() || "",
-              timestamp: "",
-            }));
+            const channels = document.querySelectorAll(".p-channel_sidebar__channel--unread");
+            return Array.from(channels).slice(0, 20).map(el => {
+              const name = el.querySelector(".p-channel_sidebar__name")?.textContent?.trim() || "";
+              const badge = el.querySelector('[data-qa="mention_badge"]')?.textContent?.trim() || "";
+              const type = el.getAttribute("data-qa-channel-sidebar-channel-type") === "im" ? "dm" : "channel";
+              const parts = [];
+              if (type === "dm") parts.push("DM");
+              if (badge) parts.push(`${badge} mentioned`);
+              else parts.push("unread");
+              return { title: name, preview: parts.join(" · "), timestamp: "" };
+            });
           },
           matrix: () => {
             const rooms = document.querySelectorAll(".mx_RoomTile");

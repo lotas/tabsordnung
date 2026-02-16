@@ -175,11 +175,18 @@ func (m *DetailModel) ViewTabWithSignal(tab *types.Tab, signals []storage.Signal
 			}
 
 			age := formatSignalAge(s.CapturedAt)
+			suffix := "  " + age
 			line := fmt.Sprintf("[%d] %s", s.ID, s.Title)
 			if s.Preview != "" {
 				line += " — " + s.Preview
 			}
-			line = prefix + line + "  " + age
+
+			// Truncate to fit within pane width (1 visual line per signal).
+			maxLen := m.Width - len(prefix) - len(suffix) - 1
+			if maxLen > 0 && len(line) > maxLen {
+				line = line[:maxLen-1] + "…"
+			}
+			line = prefix + line + suffix
 
 			if i == signalCursor {
 				base += cursorStyle.Render(line) + "\n"
