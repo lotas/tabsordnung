@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="loading" class="state">
+    <div class="spinner"></div>
+    <p>Loading...</p>
+  </div>
+
+  <div id="disconnected" class="state hidden">
+    <div class="icon-grey">T</div>
+    <p>Not connected</p>
+    <p class="hint">Start the TUI with <code>--live</code> to connect.</p>
+  </div>
+
+  <div id="tab-info" class="hidden">
+    <div class="title" id="tab-title"></div>
+    <div class="url" id="tab-url"></div>
+    <div class="meta" id="tab-meta"></div>
+    <div class="badges" id="tab-badges"></div>
+
+    <div id="summary-section">
+      <div class="section-header">Summary</div>
+      <div id="summary-content" class="hidden"></div>
+      <div id="summary-none" class="hint hidden">No summary available.</div>
+      <div id="summary-spinner" class="hidden">
+        <div class="spinner small"></div>
+        <span>Summarizing...</span>
+      </div>
+      <div id="summary-error" class="error hidden"></div>
+      <button id="summarize-btn" class="hidden">Summarize</button>
+    </div>
+
+    <div id="signals-section" class="hidden">
+      <div class="section-header">Signals <span id="signal-source-label"></span></div>
+      <ul id="signals-list"></ul>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

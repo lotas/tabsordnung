@@ -74,6 +74,14 @@ type wsCmdResponseMsg struct {
 	content string
 	items   string
 }
+type wsGetTabInfoMsg struct {
+	id    string
+	tabID int
+}
+type wsSummarizeTabMsg struct {
+	id    string
+	tabID int
+}
 
 // --- Command helpers ---
 
@@ -102,8 +110,9 @@ func sendCmdWithID(srv *server.Server, msg server.OutgoingMsg) (string, tea.Cmd)
 
 // SummarizeJob tracks a single in-flight summarization.
 type SummarizeJob struct {
-	Tab       *types.Tab
-	ContentID string // non-empty = waiting for browser content (live mode)
+	Tab            *types.Tab
+	ContentID      string // non-empty = waiting for browser content (live mode)
+	PopupRequestID string // non-empty = send summary back to extension popup when done
 }
 
 // SignalJob tracks a single in-flight signal capture.
@@ -438,6 +447,10 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 					continue // skip malformed, keep listening
 				}
 				return wsTabUpdatedMsg{tab: tab}
+			case "get-tab-info":
+				return wsGetTabInfoMsg{id: msg.ID, tabID: msg.TabID}
+			case "summarize-tab":
+				return wsSummarizeTabMsg{id: msg.ID, tabID: msg.TabID}
 			default:
 				if msg.ID != "" && msg.OK != nil {
 					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error, content: msg.Content, items: msg.Items}
@@ -839,11 +852,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case summarizeCompleteMsg:
+		job := m.summarizeJobs[msg.url]
+		popupID := ""
+		if job != nil {
+			popupID = job.PopupRequestID
+		}
 		delete(m.summarizeJobs, msg.url)
 		if msg.err != nil {
 			m.summarizeErrors[msg.url] = msg.err.Error()
+			if popupID != "" {
+				m.server.Send(server.OutgoingMsg{
+					ID:     popupID,
+					Action: "summarize-result",
+					Error:  msg.err.Error(),
+				})
+			}
 		} else {
 			delete(m.summarizeErrors, msg.url)
+			if popupID != "" {
+				m.server.Send(server.OutgoingMsg{
+					ID:      popupID,
+					Action:  "summarize-result",
+					Summary: msg.summary,
+				})
+			}
 		}
 		return m, nil
 
@@ -952,6 +984,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, listenWebSocket(m.server)
 
+	case wsGetTabInfoMsg:
+		payload := m.buildTabInfoPayload(msg.tabID)
+		m.server.Send(server.OutgoingMsg{
+			ID:      msg.id,
+			Action:  "tab-info",
+			TabInfo: payload,
+		})
+		return m, listenWebSocket(m.server)
+
+	case wsSummarizeTabMsg:
+		tab := m.findTabByBrowserID(msg.tabID)
+		if tab == nil {
+			m.server.Send(server.OutgoingMsg{
+				ID:    msg.id,
+				Action: "summarize-result",
+				Error: "Tab not found",
+			})
+			return m, listenWebSocket(m.server)
+		}
+		// Check if summary already exists
+		sumPath := summarize.SummaryPath(m.summaryDir, tab.URL, tab.Title)
+		if raw, err := summarize.ReadSummary(sumPath); err == nil {
+			m.server.Send(server.OutgoingMsg{
+				ID:      msg.id,
+				Action:  "summarize-result",
+				Summary: raw,
+			})
+			return m, listenWebSocket(m.server)
+		}
+		// Check if already in progress
+		if existing, ok := m.summarizeJobs[tab.URL]; ok {
+			existing.PopupRequestID = msg.id
+			return m, listenWebSocket(m.server)
+		}
+		// Start summarization
+		job := &SummarizeJob{Tab: tab, PopupRequestID: msg.id}
+		m.summarizeJobs[tab.URL] = job
+		if m.mode == ModeLive && m.connected {
+			id, cmd := sendCmdWithID(m.server, server.OutgoingMsg{
+				Action: "get-content",
+				TabID:  tab.BrowserID,
+			})
+			job.ContentID = id
+			return m, tea.Batch(listenWebSocket(m.server), cmd)
+		}
+		return m, tea.Batch(
+			listenWebSocket(m.server),
+			runSummarizeTab(tab, m.summaryDir, m.ollamaModel, m.ollamaHost),
+		)
+
 	case wsCmdResponseMsg:
 		// Check if this response matches a signal job
 		if m.signalActive != nil && m.signalActive.ContentID == msg.id {
@@ -1032,6 +1114,58 @@ func (m *Model) refreshSignals() {
 			m.signals = nil
 		}
 	}
+}
+
+func (m *Model) findTabByBrowserID(browserID int) *types.Tab {
+	if m.session == nil {
+		return nil
+	}
+	for _, t := range m.session.AllTabs {
+		if t.BrowserID == browserID {
+			return t
+		}
+	}
+	return nil
+}
+
+func (m *Model) buildTabInfoPayload(browserID int) *server.TabInfoPayload {
+	tab := m.findTabByBrowserID(browserID)
+	if tab == nil {
+		return nil
+	}
+	payload := &server.TabInfoPayload{
+		URL:          tab.URL,
+		Title:        tab.Title,
+		LastAccessed: tab.LastAccessed.Format("2006-01-02 15:04"),
+		StaleDays:    tab.StaleDays,
+		IsStale:      tab.IsStale,
+		IsDead:       tab.IsDead,
+		DeadReason:   tab.DeadReason,
+		IsDuplicate:  tab.IsDuplicate,
+		GitHubStatus: tab.GitHubStatus,
+	}
+	// Read summary if available
+	sumPath := summarize.SummaryPath(m.summaryDir, tab.URL, tab.Title)
+	if raw, err := summarize.ReadSummary(sumPath); err == nil {
+		payload.Summary = raw
+	}
+	// Check for signal source
+	source := signal.DetectSource(tab.URL)
+	if source != "" && m.db != nil {
+		payload.SignalSource = source
+		if signals, err := storage.ListSignals(m.db, source, false); err == nil {
+			for _, s := range signals {
+				payload.Signals = append(payload.Signals, server.SignalPayload{
+					ID:       s.ID,
+					Title:    s.Title,
+					Preview:  s.Preview,
+					SourceTS: s.SourceTS,
+					Active:   s.CompletedAt == nil,
+				})
+			}
+		}
+	}
+	return payload
 }
 
 func (m *Model) rebuildTree() {

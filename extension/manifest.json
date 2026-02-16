@@ -8,6 +8,15 @@
   "background": {
     "scripts": ["background.js"]
   },
+  "icons": {
+    "32": "icons/icon-32.svg"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "32": "icons/icon-grey-32.svg"
+    }
+  },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'; connect-src ws://127.0.0.1:*"
   }

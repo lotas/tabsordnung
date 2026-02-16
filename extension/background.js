@@ -5,6 +5,8 @@ const RECONNECT_MAX_MS = 30000;
 
 let ws = null;
 let reconnectDelay = RECONNECT_BASE_MS;
+let pendingPopupRequests = new Map(); // id → {resolve, reject}
+let popupCmdCounter = 0;
 
 function connect() {
   ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
@@ -12,16 +14,31 @@ function connect() {
   ws.addEventListener("open", async () => {
     console.log("Tabsordnung: connected");
     reconnectDelay = RECONNECT_BASE_MS;
+    browser.action.setIcon({ path: { "32": "icons/icon-32.svg" } });
     await sendSnapshot();
   });
 
   ws.addEventListener("message", (event) => {
-    handleCommand(JSON.parse(event.data));
+    const msg = JSON.parse(event.data);
+    // Route responses to pending popup requests before handleCommand
+    if (msg.id && pendingPopupRequests.has(msg.id)) {
+      const pending = pendingPopupRequests.get(msg.id);
+      pendingPopupRequests.delete(msg.id);
+      pending.resolve(msg);
+      return;
+    }
+    handleCommand(msg);
   });
 
   ws.addEventListener("close", () => {
     console.log("Tabsordnung: disconnected, reconnecting...");
     ws = null;
+    browser.action.setIcon({ path: { "32": "icons/icon-grey-32.svg" } });
+    // Reject all pending popup requests
+    for (const [id, pending] of pendingPopupRequests) {
+      pending.resolve({ connected: false });
+    }
+    pendingPopupRequests.clear();
     scheduleReconnect();
   });
 
@@ -224,6 +241,82 @@ async function handleCommand(msg) {
   } catch (e) {
     send({ id: msg.id, ok: false, error: e.message });
   }
+}
+
+// --- Popup communication ---
+
+function nextPopupCmdID() {
+  return `popup-${++popupCmdCounter}`;
+}
+
+browser.runtime.onMessage.addListener((message, _sender) => {
+  if (message.action === "get-tab-info") {
+    return handleGetTabInfo();
+  }
+  if (message.action === "summarize-tab") {
+    return handleSummarizeTab();
+  }
+  return false;
+});
+
+async function handleGetTabInfo() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    return { connected: false };
+  }
+
+  const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab) {
+    return { connected: true, error: "No active tab" };
+  }
+
+  const id = nextPopupCmdID();
+  send({ type: "get-tab-info", id, tabId: activeTab.id });
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingPopupRequests.delete(id);
+      resolve({ connected: true, error: "Timeout" });
+    }, 10000);
+
+    pendingPopupRequests.set(id, {
+      resolve: (msg) => {
+        clearTimeout(timeout);
+        resolve({ connected: true, ...msg.tabInfo });
+      },
+    });
+  });
+}
+
+async function handleSummarizeTab() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    return { connected: false };
+  }
+
+  const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab) {
+    return { connected: true, error: "No active tab" };
+  }
+
+  const id = nextPopupCmdID();
+  send({ type: "summarize-tab", id, tabId: activeTab.id });
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingPopupRequests.delete(id);
+      resolve({ error: "Summarization timed out" });
+    }, 120000); // 2 min for summarization
+
+    pendingPopupRequests.set(id, {
+      resolve: (msg) => {
+        clearTimeout(timeout);
+        if (msg.error) {
+          resolve({ error: msg.error });
+        } else {
+          resolve({ summary: msg.summary });
+        }
+      },
+    });
+  });
 }
 
 // --- Start ---

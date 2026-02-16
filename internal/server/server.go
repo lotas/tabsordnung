@@ -35,6 +35,31 @@ type TabToOpen struct {
 	Pinned bool   `json:"pinned,omitempty"`
 }
 
+// SignalPayload is a single signal item sent to the extension popup.
+type SignalPayload struct {
+	ID       int64  `json:"id"`
+	Title    string `json:"title"`
+	Preview  string `json:"preview,omitempty"`
+	SourceTS string `json:"sourceTs,omitempty"`
+	Active   bool   `json:"active"`
+}
+
+// TabInfoPayload is the enriched tab info sent to the extension popup.
+type TabInfoPayload struct {
+	URL          string          `json:"url"`
+	Title        string          `json:"title"`
+	LastAccessed string          `json:"lastAccessed"`
+	StaleDays    int             `json:"staleDays"`
+	IsStale      bool            `json:"isStale"`
+	IsDead       bool            `json:"isDead"`
+	DeadReason   string          `json:"deadReason,omitempty"`
+	IsDuplicate  bool            `json:"isDuplicate"`
+	GitHubStatus string          `json:"githubStatus,omitempty"`
+	Summary      string          `json:"summary,omitempty"`
+	Signals      []SignalPayload `json:"signals,omitempty"`
+	SignalSource string          `json:"signalSource,omitempty"`
+}
+
 // OutgoingMsg is a command from the TUI to the extension.
 type OutgoingMsg struct {
 	ID      string      `json:"id"`
@@ -46,6 +71,10 @@ type OutgoingMsg struct {
 	Name    string      `json:"name,omitempty"`
 	Color   string      `json:"color,omitempty"`
 	Source  string      `json:"source,omitempty"`
+	// Popup response fields
+	TabInfo *TabInfoPayload `json:"tabInfo,omitempty"`
+	Summary string          `json:"summary,omitempty"`
+	Error   string          `json:"error,omitempty"`
 }
 
 // Server manages the WebSocket connection to the extension.

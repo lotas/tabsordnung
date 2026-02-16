@@ -1,0 +1,225 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 700px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px;
+  color: #e0e0e0;
+  background: #1e1e2e;
+  padding: 16px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* States */
+.state {
+  text-align: center;
+  padding: 48px 0;
+}
+
+.icon-grey {
+  font-size: 40px;
+  font-weight: bold;
+  color: #666;
+  margin-bottom: 12px;
+}
+
+/* Spinner */
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #333;
+  border-top-color: #4a90d9;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto 10px;
+}
+
+.spinner.small {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+  display: inline-block;
+  vertical-align: middle;
+  margin: 0 8px 0 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Tab info */
+.title {
+  font-size: 17px;
+  font-weight: 600;
+  color: #fff;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+
+.url {
+  font-size: 13px;
+  color: #888;
+  word-break: break-all;
+  margin-bottom: 8px;
+}
+
+.meta {
+  font-size: 13px;
+  color: #aaa;
+  margin-bottom: 10px;
+}
+
+/* Badges */
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.badge.stale {
+  background: #5c4a1e;
+  color: #f0c674;
+}
+
+.badge.dead {
+  background: #4a1e1e;
+  color: #f07474;
+}
+
+.badge.duplicate {
+  background: #1e3a4a;
+  color: #74b8f0;
+}
+
+.badge.github {
+  background: #1e4a2a;
+  color: #74f0a0;
+}
+
+.badge.github.closed,
+.badge.github.merged {
+  background: #3a1e4a;
+  color: #c074f0;
+}
+
+/* Sections */
+.section-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: #aaa;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 12px 0 8px;
+  padding-top: 10px;
+  border-top: 1px solid #333;
+}
+
+#summary-content {
+  font-size: 15px;
+  line-height: 1.5;
+  color: #ccc;
+  white-space: pre-wrap;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+#summary-spinner {
+  font-size: 15px;
+  color: #aaa;
+  padding: 6px 0;
+}
+
+.error {
+  font-size: 13px;
+  color: #f07474;
+  padding: 6px 0;
+}
+
+.hint {
+  font-size: 13px;
+  color: #666;
+}
+
+.hint code {
+  background: #333;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 13px;
+}
+
+/* Button */
+button {
+  margin-top: 8px;
+  padding: 6px 18px;
+  border: none;
+  border-radius: 5px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  background: #4a90d9;
+  color: #fff;
+}
+
+button:hover {
+  background: #3a7bc8;
+}
+
+button:disabled {
+  background: #555;
+  color: #999;
+  cursor: default;
+}
+
+/* Signals */
+#signals-list {
+  list-style: none;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+#signals-list li {
+  padding: 5px 0;
+  border-bottom: 1px solid #2a2a3a;
+  font-size: 15px;
+}
+
+#signals-list li:last-child {
+  border-bottom: none;
+}
+
+.signal-title {
+  font-weight: 500;
+  color: #e0e0e0;
+}
+
+.signal-preview {
+  color: #888;
+  font-size: 13px;
+}
+
+.signal-ts {
+  color: #666;
+  font-size: 12px;
+}
+
+#signal-source-label {
+  font-weight: normal;
+  text-transform: none;
+  color: #4a90d9;
+}
