@@ -169,6 +169,11 @@ type Model struct {
 	// Focus
 	focusDetail  bool
 
+	// View switching
+	activeView    ViewType
+	signalsView   SignalsView
+	snapshotsView SnapshotsView
+
 	// Signals
 	db            *sql.DB
 	signalQueue   []*SignalJob
@@ -194,6 +199,8 @@ func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *serve
 		db:              db,
 		signalErrors:    make(map[string]string),
 	}
+	m.signalsView = NewSignalsView(db)
+	m.snapshotsView = NewSnapshotsView(db)
 	if liveMode {
 		m.mode = ModeLive
 		m.loading = true
@@ -470,13 +477,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		treeWidth := m.width * 60 / 100
 		detailWidth := m.width - treeWidth - 3 // borders
-		paneHeight := m.height - 5              // top bar + bottom bar
+		paneHeight := m.height - 4              // navbar + borders + bottom bar
 		m.tree.Width = treeWidth
 		m.tree.Height = paneHeight
 		m.detail.Width = detailWidth
 		m.detail.Height = paneHeight
 		m.picker.Width = m.width
 		m.picker.Height = m.height
+		m.signalsView.SetSize(m.width, paneHeight)
+		m.snapshotsView.SetSize(m.width, paneHeight)
 		return m, nil
 
 	case tea.MouseMsg:
@@ -505,14 +514,80 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		// Tab key toggles focus between tree and detail pane
-		if msg.String() == "tab" {
-			if m.session != nil && !m.showPicker && !m.showGroupPicker && !m.showFilterPicker {
-				m.focusDetail = !m.focusDetail
-				if !m.focusDetail {
+		// 1/2/3 switches views, Tab toggles pane focus (when no modal)
+		if !m.showPicker && !m.showGroupPicker && !m.showFilterPicker {
+			switch msg.String() {
+			case "1":
+				if m.activeView != ViewTabs {
+					m.activeView = ViewTabs
+					m.focusDetail = false
 					m.detail.Scroll = 0
 				}
 				return m, nil
+			case "2":
+				if m.activeView != ViewSignals {
+					m.activeView = ViewSignals
+					m.focusDetail = false
+					m.detail.Scroll = 0
+					return m, m.signalsView.Reload()
+				}
+				return m, nil
+			case "3":
+				if m.activeView != ViewSnapshots {
+					m.activeView = ViewSnapshots
+					m.focusDetail = false
+					m.detail.Scroll = 0
+					return m, m.snapshotsView.SetProfile(m.profile.Name)
+				}
+				return m, nil
+			case "tab", "shift+tab":
+				switch m.activeView {
+				case ViewTabs:
+					if m.focusDetail {
+						m.focusDetail = false
+						m.detail.Scroll = 0
+					} else {
+						node := m.tree.SelectedNode()
+						if node != nil && (node.Tab != nil || node.Group != nil) {
+							m.focusDetail = true
+						}
+					}
+				case ViewSignals:
+					m.signalsView.focusDetail = !m.signalsView.focusDetail
+					if !m.signalsView.focusDetail {
+						m.signalsView.detail.Scroll = 0
+					}
+				case ViewSnapshots:
+					m.snapshotsView.focusDetail = !m.snapshotsView.focusDetail
+					if !m.snapshotsView.focusDetail {
+						m.snapshotsView.detail.Scroll = 0
+					}
+				}
+				return m, nil
+			}
+		}
+
+		// Delegate to active view (skip when modal is open)
+		if !m.showPicker && !m.showGroupPicker && !m.showFilterPicker {
+			if m.activeView == ViewSignals {
+				if msg.String() == "q" || msg.String() == "ctrl+c" {
+					return m, tea.Quit
+				}
+				if msg.String() != "p" {
+					v, cmd := m.signalsView.Update(msg)
+					m.signalsView = v
+					return m, cmd
+				}
+			}
+			if m.activeView == ViewSnapshots {
+				if msg.String() == "q" || msg.String() == "ctrl+c" {
+					return m, tea.Quit
+				}
+				if msg.String() != "p" {
+					v, cmd := m.snapshotsView.Update(msg)
+					m.snapshotsView = v
+					return m, cmd
+				}
 			}
 		}
 
@@ -545,7 +620,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, reopenSignalCmd(m.db, sig.ID, m.signalSource)
 					}
 					return m, nil
-				case "tab":
+				case "esc":
 					m.focusDetail = false
 					m.detail.Scroll = 0
 					return m, nil
@@ -559,7 +634,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				// Existing non-signal detail focus handling
 				switch msg.String() {
-				case "tab":
+				case "esc":
 					m.focusDetail = false
 					m.detail.Scroll = 0
 					return m, nil
@@ -686,7 +761,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					})
 				}
 			}
-			m.tree.Toggle()
+			node := m.tree.SelectedNode()
+			if node != nil && node.Group != nil {
+				m.tree.Toggle()
+			} else if node != nil && node.Tab != nil {
+				m.focusDetail = true
+			}
 		case "h":
 			m.tree.CollapseOrParent()
 		case "l":
@@ -793,26 +873,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.groupPicker.Width = m.width
 			m.groupPicker.Height = m.height
 		case "esc":
-			m.selected = make(map[int]bool)
+			if m.focusDetail {
+				m.focusDetail = false
+				m.detail.Scroll = 0
+			} else {
+				m.selected = make(map[int]bool)
+			}
 		case "p":
 			m.showPicker = true
 			m.picker = NewSourcePicker(m.profiles)
 			m.picker.Width = m.width
 			m.picker.Height = m.height
-		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-			m.picker = NewSourcePicker(m.profiles)
-			n := int(msg.String()[0] - '0')
-			if m.picker.SelectByNumber(n) {
-				src := m.picker.Selected()
-				m.loading = true
-				if src.IsLive {
-					m.mode = ModeLive
-					return m, m.startLiveMode()
-				}
-				m.mode = ModeOffline
-				m.profile = *src.Profile
-				return m, loadSession(m.profile)
-			}
 		}
 		return m, nil
 
@@ -834,12 +905,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Set up tree
 		m.rebuildTree()
 
+		// Notify snapshots view of profile change
+		snapshotsCmd := m.snapshotsView.SetProfile(m.profile.Name)
+
 		// Start async checks
 		m.deadChecking = true
 		m.githubChecking = true
 		return m, tea.Batch(
 			runDeadLinkChecks(m.session.AllTabs),
 			runGitHubChecks(m.session.AllTabs),
+			snapshotsCmd,
 		)
 
 	case analysisCompleteMsg:
@@ -910,6 +985,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
+		// Also route to signals view if active
+		if m.activeView == ViewSignals {
+			v, cmd := m.signalsView.Update(msg)
+			m.signalsView = v
+			return m, cmd
+		}
 		return m, nil
 
 	case signalPollTickMsg:
@@ -1082,6 +1163,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, listenWebSocket(m.server)
+
+	case signalsViewLoadedMsg:
+		v, cmd := m.signalsView.Update(msg)
+		m.signalsView = v
+		return m, cmd
+
+	case snapshotDetailMsg:
+		v, cmd := m.snapshotsView.Update(msg)
+		m.snapshotsView = v
+		return m, cmd
+
+	case snapshotsLoadedMsg:
+		v, cmd := m.snapshotsView.Update(msg)
+		m.snapshotsView = v
+		return m, cmd
 	}
 
 	return m, nil
@@ -1182,7 +1278,7 @@ func (m *Model) rebuildTree() {
 
 	m.tree = NewTreeModel(m.session.Groups)
 	m.tree.Width = m.width * 60 / 100
-	m.tree.Height = m.height - 5
+	m.tree.Height = m.height - 4
 	m.tree.Filter = oldFilter
 	m.tree.SavedExpanded = oldSavedExpanded
 	m.tree.SummaryDir = m.summaryDir
@@ -1309,59 +1405,139 @@ func (m Model) View() string {
 		return fmt.Sprintf("\n  Error: %v\n\n  Press 1-9 to switch source, 'q' to quit.\n", m.err)
 	}
 
-	if m.session == nil {
+	if m.session == nil && m.activeView == ViewTabs {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.picker.View())
 	}
 
-	// Top bar
-	topBarStyle := lipgloss.NewStyle().Bold(true).Padding(0, 1)
-	var profileStr string
+	// Navbar with inline stats
+	var profileName string
 	if m.mode == ModeLive {
 		if m.connected {
-			profileStr = "Live \u25cf connected"
+			profileName = "Live \u25cf connected"
 		} else {
-			profileStr = "Live \u25cb waiting..."
+			profileName = "Live \u25cb waiting..."
 		}
 	} else {
-		profileStr = fmt.Sprintf("Profile: %s (offline)", m.profile.Name)
+		profileName = m.profile.Name
 	}
-	statsStr := fmt.Sprintf("%d tabs · %d groups", m.stats.TotalTabs, m.stats.TotalGroups)
-	if m.stats.DeadTabs > 0 {
-		statsStr += fmt.Sprintf(" · %d dead", m.stats.DeadTabs)
-	}
-	if m.stats.StaleTabs > 0 {
-		statsStr += fmt.Sprintf(" · %d stale", m.stats.StaleTabs)
-	}
-	if m.stats.DuplicateTabs > 0 {
-		statsStr += fmt.Sprintf(" · %d dup", m.stats.DuplicateTabs)
-	}
-	if m.stats.GitHubDoneTabs > 0 {
-		statsStr += fmt.Sprintf(" · %d done", m.stats.GitHubDoneTabs)
-	}
-	if m.deadChecking {
-		statsStr += " · checking links..."
-	}
-	if m.githubChecking {
-		statsStr += " · checking github..."
-	}
-	if n := len(m.summarizeJobs); n == 1 {
-		statsStr += " · summarizing 1 tab..."
-	} else if n > 1 {
-		statsStr += fmt.Sprintf(" · summarizing %d tabs...", n)
-	}
-	if m.signalActive != nil {
-		statsStr += " · checking signals..."
-	}
-	topBar := topBarStyle.Render(profileStr + "  " + statsStr)
 
-	// Filter indicator
-	filterNames := []string{"all", "stale", "dead", "duplicate", ">7d", ">30d", ">90d", "gh done", "summarized", "unsummarized"}
-	filterStr := fmt.Sprintf("[filter: %s]", filterNames[m.tree.Filter])
+	var statsStr string
+	if m.activeView == ViewTabs && m.session != nil {
+		statsStr = fmt.Sprintf("%d tabs \u00b7 %d groups", m.stats.TotalTabs, m.stats.TotalGroups)
+		if m.stats.DeadTabs > 0 {
+			statsStr += fmt.Sprintf(" \u00b7 %d dead", m.stats.DeadTabs)
+		}
+		if m.stats.StaleTabs > 0 {
+			statsStr += fmt.Sprintf(" \u00b7 %d stale", m.stats.StaleTabs)
+		}
+		if m.stats.DuplicateTabs > 0 {
+			statsStr += fmt.Sprintf(" \u00b7 %d dup", m.stats.DuplicateTabs)
+		}
+		if m.stats.GitHubDoneTabs > 0 {
+			statsStr += fmt.Sprintf(" \u00b7 %d done", m.stats.GitHubDoneTabs)
+		}
+		if m.deadChecking {
+			statsStr += " \u00b7 checking links..."
+		}
+		if m.githubChecking {
+			statsStr += " \u00b7 checking github..."
+		}
+		if n := len(m.summarizeJobs); n == 1 {
+			statsStr += " \u00b7 summarizing 1 tab..."
+		} else if n > 1 {
+			statsStr += fmt.Sprintf(" \u00b7 summarizing %d tabs...", n)
+		}
+		if m.signalActive != nil {
+			statsStr += " \u00b7 checking signals..."
+		}
+	}
+	var viewCounts [3]int
+	viewCounts[ViewTabs] = m.stats.TotalTabs
+	for _, c := range m.tree.SignalCounts {
+		viewCounts[ViewSignals] += c
+	}
+	viewCounts[ViewSnapshots] = len(m.snapshotsView.snapshots)
+	navbar := renderNavbar(m.activeView, profileName, viewCounts, statsStr, m.width)
 
-	// Panes
+	// Pane content
+	treeWidth := m.width * 60 / 100
+	detailWidth := m.width - treeWidth - 3
+	paneHeight := m.height - 4
+
+	var leftContent, rightContent string
+	var isFocusDetail bool
+
+	switch m.activeView {
+	case ViewTabs:
+		if m.session == nil {
+			leftContent = "No session loaded"
+			rightContent = ""
+		} else {
+			isFocusDetail = m.focusDetail
+			// Render detail based on selection
+			var detailContent string
+			if node := m.tree.SelectedNode(); node != nil {
+				if node.Tab != nil {
+					if m.signalSource != "" {
+						isCapturing := m.signalActive != nil && m.signalActive.Source == m.signalSource
+						if !isCapturing {
+							for _, j := range m.signalQueue {
+								if j.Source == m.signalSource {
+									isCapturing = true
+									break
+								}
+							}
+						}
+						sigErr := m.signalErrors[m.signalSource]
+						detailContent = m.detail.ViewTabWithSignal(node.Tab, m.signals, m.signalCursor, isCapturing, sigErr)
+					} else {
+						var summaryText string
+						sumPath := summarize.SummaryPath(m.summaryDir, node.Tab.URL, node.Tab.Title)
+						if raw, err := summarize.ReadSummary(sumPath); err == nil {
+							r, _ := glamour.NewTermRenderer(
+								glamour.WithStylePath("dark"),
+								glamour.WithWordWrap(detailWidth-2),
+							)
+							if rendered, err := r.Render(raw); err == nil {
+								summaryText = rendered
+							} else {
+								summaryText = raw
+							}
+						}
+						_, isSummarizing := m.summarizeJobs[node.Tab.URL]
+						tabErr := m.summarizeErrors[node.Tab.URL]
+						detailContent = m.detail.ViewTabWithSummary(node.Tab, summaryText, isSummarizing, tabErr)
+					}
+				} else if node.Group != nil {
+					detailContent = m.detail.ViewGroup(node.Group)
+				}
+			}
+			rightContent = m.detail.ViewScrolled(detailContent)
+
+			m.tree.Selected = m.selected
+			summarizingURLs := make(map[string]bool, len(m.summarizeJobs))
+			for url := range m.summarizeJobs {
+				summarizingURLs[url] = true
+			}
+			m.tree.SummarizingURLs = summarizingURLs
+			leftContent = m.tree.View()
+		}
+
+	case ViewSignals:
+		isFocusDetail = m.signalsView.FocusDetail()
+		leftContent = m.signalsView.ViewList()
+		rightContent = m.signalsView.ViewDetail()
+
+	case ViewSnapshots:
+		isFocusDetail = m.snapshotsView.FocusDetail()
+		leftContent = m.snapshotsView.ViewList()
+		rightContent = m.snapshotsView.ViewDetail()
+	}
+
+	// Pane borders
 	treeBorderColor := "62"
 	detailBorderColor := "240"
-	if m.focusDetail {
+	if isFocusDetail {
 		treeBorderColor = "240"
 		detailBorderColor = "62"
 	}
@@ -1369,79 +1545,42 @@ func (m Model) View() string {
 	treeBorder := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(treeBorderColor)).
-		Width(m.tree.Width).
-		Height(m.tree.Height)
+		Width(treeWidth).
+		Height(paneHeight)
 
 	detailBorder := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(detailBorderColor)).
-		Width(m.detail.Width).
-		Height(m.detail.Height).
-		MaxHeight(m.detail.Height + 2) // +2 for border lines
+		Width(detailWidth).
+		Height(paneHeight).
+		MaxHeight(paneHeight + 2)
 
-	// Render detail based on selection
-	var detailContent string
-	if node := m.tree.SelectedNode(); node != nil {
-		if node.Tab != nil {
-			if m.signalSource != "" {
-				isCapturing := m.signalActive != nil && m.signalActive.Source == m.signalSource
-				if !isCapturing {
-					for _, j := range m.signalQueue {
-						if j.Source == m.signalSource {
-							isCapturing = true
-							break
-						}
-					}
-				}
-				sigErr := m.signalErrors[m.signalSource]
-				detailContent = m.detail.ViewTabWithSignal(node.Tab, m.signals, m.signalCursor, isCapturing, sigErr)
-			} else {
-				// Regular tab — show summary
-				var summaryText string
-				sumPath := summarize.SummaryPath(m.summaryDir, node.Tab.URL, node.Tab.Title)
-				if raw, err := summarize.ReadSummary(sumPath); err == nil {
-					r, _ := glamour.NewTermRenderer(
-						glamour.WithStylePath("dark"),
-						glamour.WithWordWrap(m.detail.Width-2),
-					)
-					if rendered, err := r.Render(raw); err == nil {
-						summaryText = rendered
-					} else {
-						summaryText = raw
-					}
-				}
-				_, isSummarizing := m.summarizeJobs[node.Tab.URL]
-				tabErr := m.summarizeErrors[node.Tab.URL]
-				detailContent = m.detail.ViewTabWithSummary(node.Tab, summaryText, isSummarizing, tabErr)
-			}
-		} else if node.Group != nil {
-			detailContent = m.detail.ViewGroup(node.Group)
-		}
-	}
-	detailContent = m.detail.ViewScrolled(detailContent)
-
-	m.tree.Selected = m.selected
-	summarizingURLs := make(map[string]bool, len(m.summarizeJobs))
-	for url := range m.summarizeJobs {
-		summarizingURLs[url] = true
-	}
-	m.tree.SummarizingURLs = summarizingURLs
-	left := treeBorder.Render(m.tree.View())
-	right := detailBorder.Render(detailContent)
+	left := treeBorder.Render(leftContent)
+	right := detailBorder.Render(rightContent)
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
 	// Bottom bar
 	bottomBarStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Padding(0, 1)
 	var bottomText string
-	if m.mode == ModeLive && m.connected {
-		selCount := len(m.selected)
-		if selCount > 0 {
-			bottomText = fmt.Sprintf("%d selected \u00b7 x close \u00b7 g move \u00b7 esc clear \u00b7 ", selCount)
+	switch m.activeView {
+	case ViewTabs:
+		if m.mode == ModeLive && m.connected {
+			selCount := len(m.selected)
+			if selCount > 0 {
+				bottomText = fmt.Sprintf("%d selected \u00b7 x close \u00b7 g move \u00b7 esc clear \u00b7 ", selCount)
+			}
+			bottomText += "space select \u00b7 enter focus \u00b7 "
 		}
-		bottomText += "space select \u00b7 enter focus \u00b7 "
+		filterNames := []string{"all", "stale", "dead", "duplicate", ">7d", ">30d", ">90d", "gh done", "summarized", "unsummarized"}
+		filterStr := fmt.Sprintf("[filter: %s]", filterNames[m.tree.Filter])
+		bottomText += "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 f filter \u00b7 r refresh \u00b7 p source \u00b7 q quit  " + filterStr
+	case ViewSignals:
+		bottomText = "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
+	case ViewSnapshots:
+		bottomText = "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
 	}
-	bottomText += "\u2191\u2193/jk navigate \u00b7 h/l collapse/expand \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 f filter \u00b7 r refresh \u00b7 1-9 source \u00b7 q quit  " + filterStr
 	bottomBar := bottomBarStyle.Render(bottomText)
 
-	return lipgloss.JoinVertical(lipgloss.Left, topBar, panes, bottomBar)
+	// Assemble
+	return lipgloss.JoinVertical(lipgloss.Left, navbar, panes, bottomBar)
 }

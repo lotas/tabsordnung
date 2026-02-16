@@ -363,6 +363,33 @@ func ListSnapshots(db *sql.DB) ([]SnapshotSummary, error) {
 	return result, nil
 }
 
+// ListSnapshotsByProfile returns snapshots for a specific profile, ordered by
+// creation time descending.
+func ListSnapshotsByProfile(db *sql.DB, profile string) ([]SnapshotSummary, error) {
+	rows, err := db.Query(
+		"SELECT id, rev, name, profile, created_at, tab_count FROM snapshots WHERE profile = ? ORDER BY created_at DESC, id DESC",
+		profile,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query snapshots: %w", err)
+	}
+	defer rows.Close()
+
+	var result []SnapshotSummary
+	for rows.Next() {
+		var s SnapshotSummary
+		var name sql.NullString
+		if err := rows.Scan(&s.ID, &s.Rev, &name, &s.Profile, &s.CreatedAt, &s.TabCount); err != nil {
+			return nil, fmt.Errorf("scan snapshot: %w", err)
+		}
+		if name.Valid {
+			s.Name = name.String
+		}
+		result = append(result, s)
+	}
+	return result, rows.Err()
+}
+
 // GetSnapshot loads a full snapshot by profile and rev number.
 // Each tab's GroupName field is populated from the associated group.
 func GetSnapshot(db *sql.DB, profile string, rev int) (*SnapshotFull, error) {
