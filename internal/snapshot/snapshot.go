@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/lotas/tabsordnung/internal/applog"
 	"github.com/lotas/tabsordnung/internal/server"
 	"github.com/lotas/tabsordnung/internal/storage"
 	"github.com/lotas/tabsordnung/internal/types"
@@ -47,6 +48,7 @@ func Create(db *sql.DB, session *types.SessionData, label string) (rev int, crea
 		}
 
 		if identical {
+			applog.Info("snapshot.skipped", "profile", profile, "rev", latest.Rev)
 			return latest.Rev, false, nil, nil
 		}
 	}
@@ -88,6 +90,8 @@ func Create(db *sql.DB, session *types.SessionData, label string) (rev int, crea
 	if err != nil {
 		return 0, false, nil, err
 	}
+
+	applog.Info("snapshot.created", "rev", newRev, "tabs", len(tabs), "profile", profile)
 
 	// Compute diff for output (only if there was a previous snapshot).
 	if latest != nil {
@@ -145,6 +149,7 @@ func diffSnapshots(snap *storage.SnapshotFull, current *types.SessionData) *Diff
 
 // Restore reopens tabs from a snapshot via the live mode WebSocket bridge.
 func Restore(db *sql.DB, profile string, rev int, port int) error {
+	applog.Info("snapshot.restore.start", "rev", rev, "profile", profile)
 	snap, err := storage.GetSnapshot(db, profile, rev)
 	if err != nil {
 		return err
@@ -221,6 +226,7 @@ func Restore(db *sql.DB, profile string, rev int, port int) error {
 		return fmt.Errorf("timed out waiting for open tabs confirmation")
 	}
 
+	applog.Info("snapshot.restore.done", "rev", rev, "tabs", len(snap.Tabs))
 	fmt.Fprintf(os.Stderr, "Restored %d tabs from snapshot #%d\n", len(snap.Tabs), rev)
 	return nil
 }

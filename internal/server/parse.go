@@ -92,12 +92,16 @@ func ParseTab(raw json.RawMessage) (*types.Tab, error) {
 	if err := json.Unmarshal(raw, &wt); err != nil {
 		return nil, err
 	}
+	groupID := ""
+	if wt.GroupID >= 0 {
+		groupID = strconv.Itoa(wt.GroupID)
+	}
 	return &types.Tab{
 		BrowserID:    wt.ID,
 		URL:          wt.URL,
 		Title:        wt.Title,
 		LastAccessed: time.UnixMilli(wt.LastAccessed),
-		GroupID:      strconv.Itoa(wt.GroupID),
+		GroupID:      groupID,
 		Favicon:      wt.FavIconURL,
 		WindowIndex:  wt.WindowID,
 		TabIndex:     wt.Index,

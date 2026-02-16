@@ -14,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/lotas/tabsordnung/internal/analyzer"
+	"github.com/lotas/tabsordnung/internal/applog"
 	"github.com/lotas/tabsordnung/internal/export"
 	"github.com/lotas/tabsordnung/internal/firefox"
 	"github.com/lotas/tabsordnung/internal/server"
@@ -114,6 +115,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	// Initialize application log in the same directory as the database.
+	if dbPath, err := storage.DefaultDBPath(); err == nil {
+		applog.Init(filepath.Dir(dbPath))
+	}
+	defer applog.Close()
 
 	model := tui.NewModel(profiles, *staleDays, *liveMode, srv, summaryDir, resolvedModel, ollamaHost, db)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())

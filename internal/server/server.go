@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/lotas/tabsordnung/internal/applog"
 	"nhooyr.io/websocket"
 )
 
@@ -122,6 +123,7 @@ func (s *Server) Send(msg OutgoingMsg) error {
 		return nil
 	}
 
+	applog.Info("ws.send", "action", msg.Action, "id", msg.ID)
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -137,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 		})
 		if err != nil {
 			log.Printf("websocket accept: %v", err)
+			applog.Error("ws.accept", err)
 			return
 		}
 
@@ -145,11 +148,14 @@ func (s *Server) Handler() http.Handler {
 		ctx := r.Context()
 		s.mu.Lock()
 		if s.conn != nil {
+			applog.Info("ws.replaced")
 			s.conn.CloseNow()
 		}
 		s.conn = conn
 		s.connCtx = ctx
 		s.mu.Unlock()
+
+		applog.Info("ws.connected", "remote", r.RemoteAddr)
 
 		defer func() {
 			s.mu.Lock()
@@ -159,6 +165,7 @@ func (s *Server) Handler() http.Handler {
 			}
 			s.mu.Unlock()
 			conn.CloseNow()
+			applog.Info("ws.disconnected")
 		}()
 
 		for {
@@ -168,8 +175,10 @@ func (s *Server) Handler() http.Handler {
 			}
 			var msg IncomingMsg
 			if err := json.Unmarshal(data, &msg); err != nil {
+				applog.Error("ws.parse", err)
 				continue
 			}
+			applog.Info("ws.recv", "type", msg.Type)
 			select {
 			case s.msgs <- msg:
 			default:
@@ -184,6 +193,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	mux.Handle("/", s.Handler())
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
+	applog.Info("server.start", "addr", addr)
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {

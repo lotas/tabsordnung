@@ -5,20 +5,27 @@ const RECONNECT_MAX_MS = 30000;
 
 let ws = null;
 let reconnectDelay = RECONNECT_BASE_MS;
+let reconnectTimer = null;
 let pendingPopupRequests = new Map(); // id → {resolve, reject}
 let popupCmdCounter = 0;
 
 function connect() {
-  ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
 
-  ws.addEventListener("open", async () => {
+  const socket = new WebSocket(`ws://127.0.0.1:${PORT}`);
+  ws = socket;
+
+  socket.addEventListener("open", async () => {
     console.log("Tabsordnung: connected");
     reconnectDelay = RECONNECT_BASE_MS;
     browser.action.setIcon({ path: { "32": "icons/icon-32.svg" } });
     await sendSnapshot();
   });
 
-  ws.addEventListener("message", (event) => {
+  socket.addEventListener("message", (event) => {
     const msg = JSON.parse(event.data);
     // Route responses to pending popup requests before handleCommand
     if (msg.id && pendingPopupRequests.has(msg.id)) {
@@ -30,7 +37,8 @@ function connect() {
     handleCommand(msg);
   });
 
-  ws.addEventListener("close", () => {
+  socket.addEventListener("close", () => {
+    if (ws !== socket) return; // stale close — ignore
     console.log("Tabsordnung: disconnected, reconnecting...");
     ws = null;
     browser.action.setIcon({ path: { "32": "icons/icon-grey-32.svg" } });
@@ -42,23 +50,29 @@ function connect() {
     scheduleReconnect();
   });
 
-  ws.addEventListener("error", () => {
-    ws?.close();
+  socket.addEventListener("error", () => {
+    socket.close();
   });
 }
 
 function scheduleReconnect() {
-  setTimeout(() => {
+  if (reconnectTimer) return; // already scheduled
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
     connect();
     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
   }, reconnectDelay);
 }
 
 function ensureConnected() {
-  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-    reconnectDelay = RECONNECT_BASE_MS;
-    connect();
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return; // already connected or connecting
   }
+  if (reconnectTimer) {
+    return; // reconnect already scheduled
+  }
+  reconnectDelay = RECONNECT_BASE_MS;
+  connect();
 }
 
 function send(obj) {

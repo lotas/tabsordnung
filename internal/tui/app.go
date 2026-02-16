@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lotas/tabsordnung/internal/analyzer"
+	"github.com/lotas/tabsordnung/internal/applog"
 	"github.com/lotas/tabsordnung/internal/firefox"
 	"github.com/lotas/tabsordnung/internal/server"
 	"github.com/lotas/tabsordnung/internal/signal"
@@ -881,8 +882,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case signalCompleteMsg:
 		if msg.err != nil {
+			applog.Error("tui.signal", msg.err, "source", msg.source)
 			m.signalErrors[msg.source] = msg.err.Error()
 		} else {
+			applog.Info("tui.signal", "source", msg.source)
 			delete(m.signalErrors, msg.source)
 		}
 		// Reload signals for current source.
@@ -916,6 +919,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.connected = true
 		m.session = msg.data
+		applog.Info("tui.snapshot", "tabs", len(msg.data.AllTabs), "groups", len(msg.data.Groups))
 
 		analyzer.AnalyzeStale(m.session.AllTabs, m.staleDays)
 		analyzer.AnalyzeDuplicates(m.session.AllTabs)
@@ -1035,6 +1039,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case wsCmdResponseMsg:
+		applog.Info("tui.cmdResponse", "id", msg.id, "ok", msg.ok)
 		// Check if this response matches a signal job
 		if m.signalActive != nil && m.signalActive.ContentID == msg.id {
 			source := m.signalActive.Source
@@ -1234,15 +1239,20 @@ func (m *Model) removeTab(browserID int) {
 
 func (m *Model) addTab(tab *types.Tab) {
 	m.session.AllTabs = append(m.session.AllTabs, tab)
+	// Try to place in matching group (skip empty GroupID — that means ungrouped)
 	placed := false
-	for _, g := range m.session.Groups {
-		if g.ID == tab.GroupID {
-			g.Tabs = append(g.Tabs, tab)
-			placed = true
-			break
+	if tab.GroupID != "" {
+		for _, g := range m.session.Groups {
+			if g.ID == tab.GroupID {
+				g.Tabs = append(g.Tabs, tab)
+				placed = true
+				break
+			}
 		}
 	}
+	// Unmatched or empty GroupID → place in ungrouped group
 	if !placed {
+		tab.GroupID = ""
 		for _, g := range m.session.Groups {
 			if g.ID == "ungrouped" {
 				g.Tabs = append(g.Tabs, tab)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lotas/tabsordnung/internal/applog"
 	"github.com/lotas/tabsordnung/internal/types"
 )
 
@@ -94,6 +95,7 @@ func Run(cfg Config) error {
 		return nil
 	}
 
+	applog.Info("summarize.start", "count", len(group.Tabs), "group", cfg.GroupName)
 	fmt.Fprintf(os.Stderr, "Summarizing %d tabs from %q:\n", len(group.Tabs), cfg.GroupName)
 	for i, tab := range group.Tabs {
 		fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, tab.Title)
@@ -163,9 +165,11 @@ func Run(cfg Config) error {
 		}
 
 		fmt.Fprintf(os.Stderr, "        ✓ saved %s\n", outPath)
+		applog.Info("summarize.tab", "url", tab.URL)
 		newCount++
 	}
 
+	applog.Info("summarize.done", "new", newCount, "skipped", skipCount, "errors", errCount)
 	fmt.Fprintf(os.Stderr, "\nDone: %d new, %d skipped, %d errors\n", newCount, skipCount, errCount)
 	return nil
 }
