@@ -19,6 +19,7 @@ func DetectSource(url string) string {
 	case strings.Contains(lower, "slack.com"):
 		return "slack"
 	case strings.Contains(lower, "element.io"),
+		strings.Contains(lower, "chat.mozilla.org"),
 		strings.Contains(lower, "matrix."):
 		return "matrix"
 	}
