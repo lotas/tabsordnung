@@ -198,7 +198,7 @@ func (m *DetailModel) ViewTabWithSignal(tab *types.Tab, signals []storage.Signal
 			}
 		}
 
-		base += "\n" + dimStyle.Render("  c capture · x complete · u reopen")
+		base += "\n" + dimStyle.Render("  c capture · ↵ open · x complete · u reopen")
 	} else if signalErr != "" {
 		base += "\n" + errStyle.Render("Signal failed: "+signalErr)
 		base += "\n" + dimStyle.Render("  Press 'c' to retry")

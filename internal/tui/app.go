@@ -52,6 +52,11 @@ type signalActionMsg struct {
 	err    error
 }
 
+type signalNavigateMsg struct {
+	Source string
+	Title  string
+}
+
 // SourceMode distinguishes live vs offline.
 type SourceMode int
 
@@ -609,6 +614,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.scrollDetailToSignalCursor()
 					return m, nil
+				case "enter":
+					if m.mode == ModeLive && m.connected {
+						sig := m.signals[m.signalCursor]
+						tab := m.findTabForSource(m.signalSource)
+						if tab != nil && tab.BrowserID != 0 {
+							return m, navigateSignalCmd(m.server, tab.BrowserID, m.signalSource, sig.Title)
+						}
+					}
+					return m, nil
 				case "x":
 					sig := m.signals[m.signalCursor]
 					if sig.CompletedAt == nil {
@@ -994,6 +1008,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case signalNavigateMsg:
+		if m.mode == ModeLive && m.connected {
+			tab := m.findTabForSource(msg.Source)
+			if tab != nil && tab.BrowserID != 0 {
+				return m, navigateSignalCmd(m.server, tab.BrowserID, msg.Source, msg.Title)
+			}
+		}
+		return m, nil
+
 	case signalPollTickMsg:
 		return m, m.queueSignalPoll()
 
@@ -1206,6 +1229,27 @@ func (m *Model) refreshSignals() {
 			m.signals = nil
 		}
 	}
+}
+
+func (m *Model) findTabForSource(source string) *types.Tab {
+	if m.session == nil {
+		return nil
+	}
+	for _, tab := range m.session.AllTabs {
+		if signal.DetectSource(tab.URL) == source {
+			return tab
+		}
+	}
+	return nil
+}
+
+func navigateSignalCmd(srv *server.Server, tabID int, source, title string) tea.Cmd {
+	return sendCmd(srv, server.OutgoingMsg{
+		Action: "navigate-signal",
+		TabID:  tabID,
+		Source: source,
+		Title:  title,
+	})
 }
 
 func (m *Model) findTabByBrowserID(browserID int) *types.Tab {
@@ -1567,7 +1611,7 @@ func (m Model) View() string {
 		filterStr := fmt.Sprintf("[filter: %s]", filterNames[m.tree.Filter])
 		bottomText += "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 f filter \u00b7 r refresh \u00b7 p source \u00b7 q quit  " + filterStr
 	case ViewSignals:
-		bottomText = "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
+		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 open \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
 	case ViewSnapshots:
 		bottomText = "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
 	}

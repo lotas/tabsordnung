@@ -73,6 +73,7 @@ type OutgoingMsg struct {
 	Name    string      `json:"name,omitempty"`
 	Color   string      `json:"color,omitempty"`
 	Source  string      `json:"source,omitempty"`
+	Title   string      `json:"title,omitempty"`
 	// Popup response fields
 	TabInfo *TabInfoPayload `json:"tabInfo,omitempty"`
 	Summary string          `json:"summary,omitempty"`

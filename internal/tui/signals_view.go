@@ -227,6 +227,12 @@ func (v SignalsView) Update(msg tea.Msg) (SignalsView, tea.Cmd) {
 				v.toggleHeader(v.nodes[v.cursor])
 				v.buildNodes()
 			} else if msg.String() == "enter" {
+				sig := v.selectedSignal()
+				if sig != nil {
+					return v, func() tea.Msg {
+						return signalNavigateMsg{Source: sig.Source, Title: sig.Title}
+					}
+				}
 				v.focusDetail = true
 			}
 		case "x":
@@ -340,7 +346,7 @@ func (v SignalsView) ViewList() string {
 
 	if len(v.nodes) > 0 {
 		b.WriteString("\n\n")
-		b.WriteString(dimStyle.Render("  x complete · u reopen"))
+		b.WriteString(dimStyle.Render("  ↵ open · x complete · u reopen"))
 	}
 
 	return b.String()

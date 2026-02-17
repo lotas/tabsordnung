@@ -194,6 +194,65 @@ async function handleCommand(msg) {
         // Firefox doesn't have native tab groups API yet
         send({ id: msg.id, ok: true, groupId: -1 });
         return;
+      case "navigate-signal": {
+        // Focus the tab, then inject a DOM clicker to find and click the signal element
+        await browser.tabs.update(msg.tabId, { active: true });
+        const navTab = await browser.tabs.get(msg.tabId);
+        await browser.windows.update(navTab.windowId, { focused: true });
+
+        const clickers = {
+          gmail: (title) => {
+            const rows = document.querySelectorAll("tr.zA, tr.zE");
+            for (const row of rows) {
+              const senderEl = row.querySelector(".yX.yW span[name]") || row.querySelector(".yX.yW");
+              const sender = senderEl?.getAttribute?.("name") || senderEl?.textContent?.trim() || "";
+              if (sender === title) {
+                row.click();
+                return true;
+              }
+            }
+            return false;
+          },
+          slack: (title) => {
+            const channels = document.querySelectorAll(".p-channel_sidebar__channel--unread, .p-channel_sidebar__channel");
+            for (const el of channels) {
+              const name = el.querySelector(".p-channel_sidebar__name")?.textContent?.trim() || "";
+              if (name === title) {
+                el.click();
+                return true;
+              }
+            }
+            return false;
+          },
+          matrix: (title) => {
+            const rooms = document.querySelectorAll(".mx_RoomTile");
+            for (const room of rooms) {
+              const name = room.querySelector(".mx_RoomTile_title")?.textContent?.trim() || "";
+              if (name === title) {
+                room.click();
+                return true;
+              }
+            }
+            return false;
+          },
+        };
+
+        const clicker = clickers[msg.source];
+        if (!clicker) {
+          send({ id: msg.id, ok: true, clicked: false });
+          return;
+        }
+
+        const clickResults = await browser.scripting.executeScript({
+          target: { tabId: msg.tabId },
+          func: clicker,
+          args: [msg.title],
+        });
+
+        const clicked = clickResults?.[0]?.result || false;
+        send({ id: msg.id, ok: true, clicked });
+        return;
+      }
       case "scrape-activity": {
         const scrapers = {
           gmail: () => {
