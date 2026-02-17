@@ -42,6 +42,20 @@ func TestParseItemsJSONWithTimestamp(t *testing.T) {
 	}
 }
 
+func TestParseItemsJSONWithSnippet(t *testing.T) {
+	raw := `[{"title":"Alice","preview":"Project update","snippet":"Hey team, the deploy is done.","timestamp":"2:30 PM"}]`
+	items, err := ParseItemsJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].Snippet != "Hey team, the deploy is done." {
+		t.Errorf("items[0].Snippet = %q, want 'Hey team, the deploy is done.'", items[0].Snippet)
+	}
+}
+
 func TestParseItemsJSON(t *testing.T) {
 	raw := `[{"title":"Alice","preview":"hello"},{"title":"Bob","preview":"world"}]`
 	items, err := ParseItemsJSON(raw)

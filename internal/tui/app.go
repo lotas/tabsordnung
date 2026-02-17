@@ -402,6 +402,7 @@ func runReconcileSignals(db *sql.DB, source string, items []signal.SignalItem, c
 			records[i] = storage.SignalRecord{
 				Title:    item.Title,
 				Preview:  item.Preview,
+				Snippet:  item.Snippet,
 				SourceTS: item.Timestamp,
 			}
 		}
@@ -1260,6 +1261,7 @@ func (m *Model) buildTabInfoPayload(browserID int) *server.TabInfoPayload {
 					ID:       s.ID,
 					Title:    s.Title,
 					Preview:  s.Preview,
+					Snippet:  s.Snippet,
 					SourceTS: s.SourceTS,
 					Active:   s.CompletedAt == nil,
 				})

@@ -201,8 +201,9 @@ async function handleCommand(msg) {
             return Array.from(rows).slice(0, 20).map(row => {
               const sender = row.querySelector(".yX.yW span")?.getAttribute("name") || row.querySelector(".yX.yW")?.textContent?.trim() || "";
               const subject = row.querySelector(".bog span")?.textContent?.trim() || row.querySelector(".y6 span")?.textContent?.trim() || "";
+              const snippet = row.querySelector(".xT .y2")?.textContent?.trim() || row.querySelector(".y2")?.textContent?.trim() || "";
               const timestamp = row.querySelector("td.xW span")?.getAttribute("title") || row.querySelector("td.xW span")?.textContent?.trim() || "";
-              return { title: sender, preview: subject, timestamp };
+              return { title: sender, preview: subject, snippet, timestamp };
             });
           },
           slack: () => {

@@ -8,6 +8,7 @@ import (
 type SignalItem struct {
 	Title     string `json:"title"`
 	Preview   string `json:"preview"`
+	Snippet   string `json:"snippet"`
 	Timestamp string `json:"timestamp"`
 }
 

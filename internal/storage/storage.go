@@ -154,6 +154,11 @@ CREATE TABLE signals (
     UNIQUE(source, title, source_ts)
 );`,
 	},
+	{
+		Version:     4,
+		Description: "add snippet column to signals",
+		SQL:         `ALTER TABLE signals ADD COLUMN snippet TEXT DEFAULT '';`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.

@@ -41,6 +41,7 @@ type SignalPayload struct {
 	ID       int64  `json:"id"`
 	Title    string `json:"title"`
 	Preview  string `json:"preview,omitempty"`
+	Snippet  string `json:"snippet,omitempty"`
 	SourceTS string `json:"sourceTs,omitempty"`
 	Active   bool   `json:"active"`
 }

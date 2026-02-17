@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -233,6 +234,34 @@ func TestReconcileSignals_PinnedNotAutoCompleted(t *testing.T) {
 	}
 }
 
+func TestSignalSnippet(t *testing.T) {
+	db := testDB(t)
+
+	now := time.Now()
+	err := InsertSignal(db, SignalRecord{
+		Source:     "gmail",
+		Title:      "Alice",
+		Preview:    "Project update",
+		Snippet:    "Hey team, the deploy is done.",
+		SourceTS:   "2:30 PM",
+		CapturedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("InsertSignal: %v", err)
+	}
+
+	sigs, err := ListSignals(db, "gmail", false)
+	if err != nil {
+		t.Fatalf("ListSignals: %v", err)
+	}
+	if len(sigs) != 1 {
+		t.Fatalf("expected 1, got %d", len(sigs))
+	}
+	if sigs[0].Snippet != "Hey team, the deploy is done." {
+		t.Errorf("Snippet = %q, want 'Hey team, the deploy is done.'", sigs[0].Snippet)
+	}
+}
+
 func TestReconcileSignals_ManuallyCompletedStaysCompleted(t *testing.T) {
 	db := testDB(t)
 
@@ -253,5 +282,48 @@ func TestReconcileSignals_ManuallyCompletedStaysCompleted(t *testing.T) {
 		if s.Title == "Alice" {
 			t.Fatal("manually completed signal should not be reactivated")
 		}
+	}
+}
+
+func TestFormatSignalsMarkdownWithSnippet(t *testing.T) {
+	now := time.Now()
+	sigs := []SignalRecord{
+		{ID: 1, Source: "gmail", Title: "Alice", Preview: "Project update", Snippet: "Hey team, deploy is done.", SourceTS: "2:30 PM", CapturedAt: now},
+		{ID: 2, Source: "gmail", Title: "Bob", Preview: "Sync notes", CapturedAt: now},
+	}
+	out := FormatSignalsMarkdown(sigs)
+	if !strings.Contains(out, "> Hey team, deploy is done.") {
+		t.Errorf("expected snippet as blockquote, got:\n%s", out)
+	}
+	// Signal without snippet should not have blockquote
+	lines := strings.Split(out, "\n")
+	bobLine := ""
+	for i, line := range lines {
+		if strings.Contains(line, "Bob") {
+			if i+1 < len(lines) {
+				bobLine = lines[i+1]
+			}
+			break
+		}
+	}
+	if strings.HasPrefix(strings.TrimSpace(bobLine), ">") {
+		t.Errorf("Bob should not have a blockquote line, got: %q", bobLine)
+	}
+}
+
+func TestFormatSignalsJSONWithSnippet(t *testing.T) {
+	now := time.Now()
+	sigs := []SignalRecord{
+		{ID: 1, Source: "gmail", Title: "Alice", Preview: "Project update", Snippet: "Hey team, deploy is done.", CapturedAt: now},
+	}
+	out, err := FormatSignalsJSON(sigs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `"snippet"`) {
+		t.Errorf("expected snippet field in JSON, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Hey team, deploy is done.") {
+		t.Errorf("expected snippet value in JSON, got:\n%s", out)
 	}
 }

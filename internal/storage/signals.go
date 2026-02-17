@@ -14,6 +14,7 @@ type SignalRecord struct {
 	Source        string
 	Title         string
 	Preview       string
+	Snippet       string
 	SourceTS      string
 	CapturedAt    time.Time
 	CompletedAt   *time.Time
@@ -24,9 +25,9 @@ type SignalRecord struct {
 // InsertSignal inserts a signal, silently ignoring duplicates (same source+title+source_ts).
 func InsertSignal(db *sql.DB, sig SignalRecord) error {
 	_, err := db.Exec(
-		`INSERT OR IGNORE INTO signals (source, title, preview, source_ts, captured_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		sig.Source, sig.Title, sig.Preview, sig.SourceTS, sig.CapturedAt,
+		`INSERT OR IGNORE INTO signals (source, title, preview, snippet, source_ts, captured_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		sig.Source, sig.Title, sig.Preview, sig.Snippet, sig.SourceTS, sig.CapturedAt,
 	)
 	return err
 }
@@ -35,7 +36,7 @@ func InsertSignal(db *sql.DB, sig SignalRecord) error {
 // If includeCompleted is false, only returns active signals (completed_at IS NULL).
 // Results are ordered: active first (newest captured_at first), then completed (newest completed_at first).
 func ListSignals(db *sql.DB, source string, includeCompleted bool) ([]SignalRecord, error) {
-	query := `SELECT id, source, title, preview, source_ts, captured_at, completed_at, auto_completed, pinned
+	query := `SELECT id, source, title, preview, snippet, source_ts, captured_at, completed_at, auto_completed, pinned
 		FROM signals WHERE 1=1`
 	var args []interface{}
 
@@ -61,7 +62,7 @@ func ListSignals(db *sql.DB, source string, includeCompleted bool) ([]SignalReco
 	for rows.Next() {
 		var s SignalRecord
 		var completedAt sql.NullTime
-		if err := rows.Scan(&s.ID, &s.Source, &s.Title, &s.Preview, &s.SourceTS,
+		if err := rows.Scan(&s.ID, &s.Source, &s.Title, &s.Preview, &s.Snippet, &s.SourceTS,
 			&s.CapturedAt, &completedAt, &s.AutoCompleted, &s.Pinned); err != nil {
 			return nil, err
 		}
@@ -136,15 +137,15 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 
 	// 1. Insert new items.
 	insertStmt, err := tx.Prepare(
-		`INSERT OR IGNORE INTO signals (source, title, preview, source_ts, captured_at)
-		 VALUES (?, ?, ?, ?, ?)`)
+		`INSERT OR IGNORE INTO signals (source, title, preview, snippet, source_ts, captured_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer insertStmt.Close()
 
 	for _, item := range items {
-		if _, err := insertStmt.Exec(source, item.Title, item.Preview, item.SourceTS, capturedAt); err != nil {
+		if _, err := insertStmt.Exec(source, item.Title, item.Preview, item.Snippet, item.SourceTS, capturedAt); err != nil {
 			return err
 		}
 	}
@@ -231,6 +232,9 @@ func FormatSignalsMarkdown(signals []SignalRecord) string {
 			} else {
 				fmt.Fprintf(&b, "%s %s (%s)\n", prefix, s.Title, age)
 			}
+			if s.Snippet != "" {
+				fmt.Fprintf(&b, "  > %s\n", s.Snippet)
+			}
 		}
 		b.WriteString("\n")
 	}
@@ -262,6 +266,7 @@ type SignalJSONOutput struct {
 	ID         int64  `json:"id"`
 	Title      string `json:"title"`
 	Preview    string `json:"preview"`
+	Snippet    string `json:"snippet,omitempty"`
 	SourceTS   string `json:"source_ts,omitempty"`
 	CapturedAt string `json:"captured_at"`
 	Active     bool   `json:"active"`
@@ -275,6 +280,7 @@ func FormatSignalsJSON(signals []SignalRecord) (string, error) {
 			ID:         s.ID,
 			Title:      s.Title,
 			Preview:    s.Preview,
+			Snippet:    s.Snippet,
 			SourceTS:   s.SourceTS,
 			CapturedAt: s.CapturedAt.Format(time.RFC3339),
 			Active:     s.CompletedAt == nil,

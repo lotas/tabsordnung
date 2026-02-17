@@ -370,6 +370,12 @@ func (v SignalsView) ViewDetail() string {
 		b.WriteString(valueStyle.Render(sig.Preview) + "\n\n")
 	}
 
+	if sig.Snippet != "" {
+		snippetStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Italic(true)
+		b.WriteString(labelStyle.Render("Snippet") + "\n")
+		b.WriteString(snippetStyle.Render(sig.Snippet) + "\n\n")
+	}
+
 	if sig.SourceTS != "" {
 		b.WriteString(labelStyle.Render("Timestamp") + "\n")
 		b.WriteString(valueStyle.Render(sig.SourceTS) + "\n\n")
