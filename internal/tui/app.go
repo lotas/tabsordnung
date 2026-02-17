@@ -466,7 +466,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "3":
 				if m.activeView != ViewSnapshots {
 					m.activeView = ViewSnapshots
-					return m, m.snapshotsView.SetProfile(m.profile.Name)
+					if !m.snapshotsView.loaded {
+						return m, m.snapshotsView.LoadAll()
+					}
 				}
 				return m, nil
 			}
@@ -563,7 +565,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabsView.stats = analyzer.ComputeStats(m.session)
 		m.tabsView.RebuildTree()
 
-		snapshotsCmd := m.snapshotsView.SetProfile(m.profile.Name)
+		snapshotsCmd := m.snapshotsView.LoadAll()
 
 		m.tabsView.deadChecking = true
 		m.tabsView.githubChecking = true
@@ -965,7 +967,7 @@ func (m Model) View() string {
 	navbar := renderNavbar(m.activeView, profileName, viewCounts, statsStr, m.width)
 
 	// Pane content
-	treeWidth := m.width * 60 / 100
+	treeWidth := m.width * TreeWidthPct / 100
 	detailWidth := m.width - treeWidth - 3
 	paneHeight := m.height - 4
 

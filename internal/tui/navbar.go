@@ -14,6 +14,9 @@ const (
 	ViewSnapshots
 )
 
+// TreeWidthPct is the percentage of terminal width used for the left (tree/list) pane.
+const TreeWidthPct = 50
+
 var viewNames = []string{"Tabs", "Signals", "Snapshots"}
 
 func renderNavbar(active ViewType, profileName string, counts [3]int, stats string, width int) string {

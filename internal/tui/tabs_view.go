@@ -77,7 +77,7 @@ func NewTabsView(srv *server.Server, db *sql.DB, summaryDir, ollamaModel, ollama
 func (v *TabsView) SetSize(w, h int) {
 	v.width = w
 	v.height = h
-	treeWidth := w * 60 / 100
+	treeWidth := w * TreeWidthPct / 100
 	paneHeight := h - 4
 	v.tree.Width = treeWidth
 	v.tree.Height = paneHeight
@@ -201,7 +201,7 @@ func (v *TabsView) RebuildTree() {
 	oldSavedExpanded := v.tree.SavedExpanded
 
 	v.tree = NewTreeModel(v.session.Groups)
-	v.tree.Width = v.width * 60 / 100
+	v.tree.Width = v.width * TreeWidthPct / 100
 	v.tree.Height = v.height - 4
 	v.tree.Filter = oldFilter
 	v.tree.SavedExpanded = oldSavedExpanded
@@ -241,7 +241,7 @@ func (v *TabsView) RebuildTree() {
 func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
-		treeWidth := v.width * 60 / 100
+		treeWidth := v.width * TreeWidthPct / 100
 		onDetail := msg.X > treeWidth+1
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
@@ -497,7 +497,7 @@ func (v TabsView) ViewDetail() string {
 		return ""
 	}
 
-	detailWidth := v.width - (v.width * 60 / 100) - 3
+	detailWidth := v.width - (v.width * TreeWidthPct / 100) - 3
 	var detailContent string
 
 	if node.Tab != nil {

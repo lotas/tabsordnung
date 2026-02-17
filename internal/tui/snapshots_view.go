@@ -22,15 +22,16 @@ type snapshotDetailMsg struct {
 
 type SnapshotsView struct {
 	db        *sql.DB
-	profile   string
 	snapshots []storage.SnapshotSummary
 	selected  *storage.SnapshotFull
 	cursor    int
 	offset    int
 	detail    DetailModel
 	width     int
+	treeWidth int
 	height    int
 	loading   bool
+	loaded    bool
 	err       error
 
 	// Right pane state
@@ -47,23 +48,19 @@ func NewSnapshotsView(db *sql.DB) SnapshotsView {
 
 func (v SnapshotsView) Init() tea.Cmd { return nil }
 
-func (v *SnapshotsView) SetProfile(profile string) tea.Cmd {
-	if v.profile == profile {
-		return nil
-	}
-	v.profile = profile
+func (v *SnapshotsView) LoadAll() tea.Cmd {
 	v.cursor = 0
 	v.offset = 0
 	v.selected = nil
 	v.loading = true
+	v.loaded = false
 	return v.loadSnapshots()
 }
 
 func (v *SnapshotsView) loadSnapshots() tea.Cmd {
-	profile := v.profile
 	db := v.db
 	return func() tea.Msg {
-		snaps, err := storage.ListSnapshotsByProfile(db, profile)
+		snaps, err := storage.ListSnapshots(db)
 		return snapshotsLoadedMsg{snapshots: snaps, err: err}
 	}
 }
@@ -79,7 +76,8 @@ func (v *SnapshotsView) loadDetail(profile string, rev int) tea.Cmd {
 func (v *SnapshotsView) SetSize(w, h int) {
 	v.width = w
 	v.height = h
-	v.detail.Width = w - (w * 60 / 100) - 3
+	v.treeWidth = w * TreeWidthPct / 100
+	v.detail.Width = w - v.treeWidth - 3
 	v.detail.Height = h
 }
 
@@ -87,6 +85,7 @@ func (v SnapshotsView) Update(msg tea.Msg) (SnapshotsView, tea.Cmd) {
 	switch msg := msg.(type) {
 	case snapshotsLoadedMsg:
 		v.loading = false
+		v.loaded = true
 		if msg.err != nil {
 			v.err = msg.err
 			return v, nil
@@ -174,7 +173,7 @@ func (v SnapshotsView) ViewList() string {
 	}
 
 	cursorStyle := lipgloss.NewStyle().Bold(true).Reverse(true)
-	treeWidth := v.width * 60 / 100
+	treeWidth := v.treeWidth
 
 	var b strings.Builder
 	end := v.offset + v.height
@@ -189,7 +188,7 @@ func (v SnapshotsView) ViewList() string {
 		if s.Name != "" {
 			label = " " + s.Name
 		}
-		line := fmt.Sprintf("  %s  (%d tabs)%s", ts, s.TabCount, label)
+		line := fmt.Sprintf("  %s  %s  (%d tabs)%s", ts, s.Profile, s.TabCount, label)
 
 		if i == v.cursor {
 			for len(line) < treeWidth {
@@ -218,8 +217,9 @@ func (v SnapshotsView) ViewDetail() string {
 	var b strings.Builder
 
 	b.WriteString(labelStyle.Render("Snapshot") + "\n")
-	b.WriteString(fmt.Sprintf("Rev %d · %s · %d tabs\n",
+	b.WriteString(fmt.Sprintf("Rev %d · %s · %s · %d tabs\n",
 		v.selected.Rev,
+		v.selected.Profile,
 		v.selected.CreatedAt.Local().Format("2006-01-02 15:04"),
 		v.selected.TabCount))
 	if v.selected.Name != "" {

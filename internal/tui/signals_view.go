@@ -63,7 +63,7 @@ func (v *SignalsView) Reload() tea.Cmd {
 func (v *SignalsView) SetSize(w, h int) {
 	v.width = w
 	v.height = h
-	v.detail.Width = w - (w * 60 / 100) - 3
+	v.detail.Width = w - (w * TreeWidthPct / 100) - 3
 	v.detail.Height = h
 }
 
@@ -291,11 +291,10 @@ func (v SignalsView) ViewList() string {
 		return "No signals yet.\n\n  Press 'c' on a signal source tab\n  (Gmail, Slack, Matrix) to capture."
 	}
 
-	treeWidth := v.width * 60 / 100
+	treeWidth := v.width * TreeWidthPct / 100
 	cursorStyle := lipgloss.NewStyle().Bold(true).Reverse(true)
 	groupStyle := lipgloss.NewStyle().Bold(true)
 	completedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 	var b strings.Builder
 	end := v.offset + v.height
@@ -342,11 +341,6 @@ func (v SignalsView) ViewList() string {
 		if i < end-1 {
 			b.WriteString("\n")
 		}
-	}
-
-	if len(v.nodes) > 0 {
-		b.WriteString("\n\n")
-		b.WriteString(dimStyle.Render("  ↵ open · x complete · u reopen"))
 	}
 
 	return b.String()
