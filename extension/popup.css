@@ -130,6 +130,36 @@ body {
   border-top: 1px solid #333;
 }
 
+.summary-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.summarize-btn-small {
+  padding: 3px 10px;
+  font-size: 12px;
+  margin-top: 0;
+  border: none;
+  border-radius: 4px;
+  font-weight: 500;
+  cursor: pointer;
+  background: #4a90d9;
+  color: #fff;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.summarize-btn-small:hover {
+  background: #3a7bc8;
+}
+
+.summarize-btn-small:disabled {
+  background: #555;
+  color: #999;
+  cursor: default;
+}
+
 #summary-content {
   font-size: 15px;
   line-height: 1.5;

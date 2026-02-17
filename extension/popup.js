@@ -63,9 +63,9 @@ function renderTabInfo(data) {
     $("#summary-content").classList.remove("hidden");
   } else {
     $("#summary-none").classList.remove("hidden");
-    $("#summarize-btn").classList.remove("hidden");
-    $("#summarize-btn").addEventListener("click", () => summarizeTab());
   }
+  $("#summarize-btn").classList.remove("hidden");
+  $("#summarize-btn").addEventListener("click", () => summarizeTab());
 
   // Signals
   if (data.signalSource && data.signals && data.signals.length > 0) {
@@ -125,6 +125,7 @@ async function summarizeTab() {
   if (response && response.summary) {
     $("#summary-content").innerHTML = marked.parse(response.summary);
     $("#summary-content").classList.remove("hidden");
+    btn.classList.remove("hidden");
   } else {
     const errMsg = (response && response.error) || "Summarization failed";
     $("#summary-error").textContent = errMsg;

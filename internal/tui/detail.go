@@ -131,6 +131,7 @@ func (m *DetailModel) ViewTabWithSummary(tab *types.Tab, summary string, summari
 		base += "\n" + activeStyle.Render("Summarizing... (fetching & processing)")
 	} else if summary != "" {
 		base += "\n" + labelStyle.Render("Summary") + "\n" + summary
+		base += "\n" + dimStyle.Render("  Press 's' to re-summarize")
 	} else if summarizeErr != "" {
 		base += "\n" + errStyle.Render("Summarize failed: "+summarizeErr)
 		base += "\n" + dimStyle.Render("  Press 's' to retry")

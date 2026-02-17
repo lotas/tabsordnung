@@ -1089,16 +1089,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, listenWebSocket(m.server)
 		}
-		// Check if summary already exists
-		sumPath := summarize.SummaryPath(m.summaryDir, tab.URL, tab.Title)
-		if raw, err := summarize.ReadSummary(sumPath); err == nil {
-			m.server.Send(server.OutgoingMsg{
-				ID:      msg.id,
-				Action:  "summarize-result",
-				Summary: raw,
-			})
-			return m, listenWebSocket(m.server)
-		}
 		// Check if already in progress
 		if existing, ok := m.summarizeJobs[tab.URL]; ok {
 			existing.PopupRequestID = msg.id
