@@ -12,7 +12,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lotas/tabsordnung/internal/analyzer"
 	"github.com/lotas/tabsordnung/internal/applog"
@@ -56,6 +55,8 @@ type signalNavigateMsg struct {
 	Source string
 	Title  string
 }
+
+type rebuildTickMsg struct{}
 
 // SourceMode distinguishes live vs offline.
 type SourceMode int
@@ -135,12 +136,9 @@ type Model struct {
 	profiles  []types.Profile
 	profile   types.Profile
 	session   *types.SessionData
-	stats     types.Stats
 	staleDays int
 
 	// UI state
-	tree       TreeModel
-	detail     DetailModel
 	picker     SourcePicker
 	showPicker bool
 	loading    bool
@@ -148,62 +146,49 @@ type Model struct {
 	width      int
 	height     int
 
-	// Dead link checking
-	deadChecking bool
-	// GitHub status checking
-	githubChecking bool
-
 	// Live mode
-	mode            SourceMode
-	server          *server.Server
-	port            int
-	connected       bool
-	selected        map[int]bool // BrowserID -> selected (live mode)
+	mode             SourceMode
+	server           *server.Server
+	port             int
+	connected        bool
+	cancel           context.CancelFunc
 	groupPicker      GroupPicker
 	showGroupPicker  bool
 	filterPicker     FilterPicker
 	showFilterPicker bool
 
-	// Summarization
-	summaryDir       string
-	ollamaModel      string
-	ollamaHost       string
-	summarizeJobs    map[string]*SummarizeJob // URL → active job
-	summarizeErrors  map[string]string        // URL → error message (persists after job, cleared on retry)
+	// Summarization config (needed for WS-triggered summarize)
+	summaryDir  string
+	ollamaModel string
+	ollamaHost  string
 
-	// Focus
-	focusDetail  bool
+	// Database
+	db *sql.DB
 
 	// View switching
 	activeView    ViewType
+	tabsView      TabsView
 	signalsView   SignalsView
 	snapshotsView SnapshotsView
 
-	// Signals
-	db            *sql.DB
-	signalQueue   []*SignalJob
-	signalActive  *SignalJob
-	signalErrors  map[string]string
-	signals       []storage.SignalRecord  // signals for currently viewed source
-	signalCursor  int                      // cursor position in signal list
-	signalSource  string                   // source of currently loaded signals
+	// Debounced rebuild
+	rebuildDirty     bool
+	rebuildScheduled bool
 }
 
 func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server, summaryDir, ollamaModel, ollamaHost string, db *sql.DB) Model {
 	m := Model{
-		profiles:        profiles,
-		staleDays:       staleDays,
-		selected:        make(map[int]bool),
-		server:          srv,
-		port:            srv.Port(),
-		summaryDir:      summaryDir,
-		ollamaModel:     ollamaModel,
-		ollamaHost:      ollamaHost,
-		summarizeJobs:   make(map[string]*SummarizeJob),
-		summarizeErrors: make(map[string]string),
-		db:              db,
-		signalErrors:    make(map[string]string),
+		profiles:    profiles,
+		staleDays:   staleDays,
+		server:      srv,
+		port:        srv.Port(),
+		summaryDir:  summaryDir,
+		ollamaModel: ollamaModel,
+		ollamaHost:  ollamaHost,
+		db:          db,
 	}
+	m.tabsView = NewTabsView(srv, db, summaryDir, ollamaModel, ollamaHost)
+	m.tabsView.staleDays = staleDays
 	m.signalsView = NewSignalsView(db)
 	m.snapshotsView = NewSnapshotsView(db)
 	if liveMode {
@@ -219,45 +204,30 @@ func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *serve
 	return m
 }
 
-func (m *Model) selectedOrCurrentTabIDs() []int {
-	if len(m.selected) > 0 {
-		ids := make([]int, 0, len(m.selected))
-		for id := range m.selected {
-			ids = append(ids, id)
-		}
-		return ids
-	}
-	node := m.tree.SelectedNode()
-	if node != nil && node.Tab != nil && node.Tab.BrowserID != 0 {
-		return []int{node.Tab.BrowserID}
-	}
-	return nil
-}
-
 func (m Model) Init() tea.Cmd {
 	if m.mode == ModeLive {
-		return m.startLiveMode()
+		return tea.Batch(
+			listenWebSocket(m.server),
+			startWSServerCtx(context.Background(), m.server),
+		)
 	}
 	if len(m.profiles) == 1 {
-		// Return command to load the single profile. The profile field will be
-		// set when sessionLoadedMsg arrives (via data.Profile), so the value
-		// receiver issue is avoided.
 		return loadSession(m.profiles[0])
 	}
-	// Multiple profiles: show picker (handled in View via showPicker logic)
 	return nil
 }
 
-func (m Model) startLiveMode() tea.Cmd {
+func (m *Model) startLiveMode() tea.Cmd {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
 	return tea.Batch(
 		listenWebSocket(m.server),
-		startWSServer(m.server),
+		startWSServerCtx(ctx, m.server),
 	)
 }
 
-func startWSServer(srv *server.Server) tea.Cmd {
+func startWSServerCtx(ctx context.Context, srv *server.Server) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
 		srv.ListenAndServe(ctx)
 		return wsDisconnectedMsg{}
 	}
@@ -281,8 +251,6 @@ func runDeadLinkChecks(tabs []*types.Tab) tea.Cmd {
 			analyzer.AnalyzeDeadLinks(tabs, results)
 			close(results)
 		}()
-		// Drain the channel. AnalyzeDeadLinks modifies tabs in-place,
-		// so we just wait for all checks to complete.
 		for range results {
 		}
 		return analysisCompleteMsg{}
@@ -342,62 +310,12 @@ func runSummarizeWithContent(tab *types.Tab, content, outDir, model, host string
 	}
 }
 
-func (m *Model) processNextSignal() tea.Cmd {
-	if m.signalActive != nil || len(m.signalQueue) == 0 {
-		return nil
-	}
-	m.signalActive = m.signalQueue[0]
-	m.signalQueue = m.signalQueue[1:]
-
-	id, cmd := sendCmdWithID(m.server, server.OutgoingMsg{
-		Action: "scrape-activity",
-		TabID:  m.signalActive.Tab.BrowserID,
-		Source: m.signalActive.Source,
-	})
-	m.signalActive.ContentID = id
-	return cmd
-}
-
 const signalPollInterval = 5 * time.Minute
 
 func signalPollTick() tea.Cmd {
 	return tea.Tick(signalPollInterval, func(time.Time) tea.Msg {
 		return signalPollTickMsg{}
 	})
-}
-
-// queueSignalPoll walks all tabs, picks one tab per signal source, and queues
-// signal jobs for sources that aren't already queued or active.
-func (m *Model) queueSignalPoll() tea.Cmd {
-	if m.session == nil || !m.connected {
-		return signalPollTick()
-	}
-
-	// Collect one tab per source.
-	sourceTabs := make(map[string]*types.Tab)
-	for _, tab := range m.session.AllTabs {
-		src := signal.DetectSource(tab.URL)
-		if src == "" {
-			continue
-		}
-		if _, ok := sourceTabs[src]; !ok {
-			sourceTabs[src] = tab
-		}
-	}
-
-	// Skip sources already in queue or active.
-	if m.signalActive != nil {
-		delete(sourceTabs, m.signalActive.Source)
-	}
-	for _, j := range m.signalQueue {
-		delete(sourceTabs, j.Source)
-	}
-
-	for src, tab := range sourceTabs {
-		m.signalQueue = append(m.signalQueue, &SignalJob{Tab: tab, Source: src})
-	}
-
-	return tea.Batch(m.processNextSignal(), signalPollTick())
 }
 
 func runReconcileSignals(db *sql.DB, source string, items []signal.SignalItem, capturedAt time.Time) tea.Cmd {
@@ -450,7 +368,7 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 			case "tab.created":
 				tab, err := server.ParseTab(msg.Tab)
 				if err != nil {
-					continue // skip malformed, keep listening
+					continue
 				}
 				return wsTabCreatedMsg{tab: tab}
 			case "tab.removed":
@@ -458,7 +376,7 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 			case "tab.updated", "tab.moved":
 				tab, err := server.ParseTab(msg.Tab)
 				if err != nil {
-					continue // skip malformed, keep listening
+					continue
 				}
 				return wsTabUpdatedMsg{tab: tab}
 			case "get-tab-info":
@@ -469,11 +387,50 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 				if msg.ID != "" && msg.OK != nil {
 					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error, content: msg.Content, items: msg.Items}
 				}
-				// Unknown message type, skip and keep listening
 			}
 		}
 	}
 }
+
+func navigateSignalCmd(srv *server.Server, tabID int, source, title string) tea.Cmd {
+	return sendCmd(srv, server.OutgoingMsg{
+		Action: "navigate-signal",
+		TabID:  tabID,
+		Source: source,
+		Title:  title,
+	})
+}
+
+// --- Debounce helpers ---
+
+func rebuildTick() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+		return rebuildTickMsg{}
+	})
+}
+
+func (m *Model) scheduleRebuild() tea.Cmd {
+	m.rebuildDirty = true
+	if m.rebuildScheduled {
+		return nil
+	}
+	m.rebuildScheduled = true
+	return rebuildTick()
+}
+
+func (m *Model) doRebuild() {
+	if !m.rebuildDirty || m.session == nil {
+		return
+	}
+	analyzer.AnalyzeStale(m.session.AllTabs, m.staleDays)
+	analyzer.AnalyzeDuplicates(m.session.AllTabs)
+	m.tabsView.stats = analyzer.ComputeStats(m.session)
+	m.tabsView.RebuildTree()
+	m.rebuildDirty = false
+	m.rebuildScheduled = false
+}
+
+// --- Update ---
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -481,427 +438,113 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		treeWidth := m.width * 60 / 100
-		detailWidth := m.width - treeWidth - 3 // borders
-		paneHeight := m.height - 4              // navbar + borders + bottom bar
-		m.tree.Width = treeWidth
-		m.tree.Height = paneHeight
-		m.detail.Width = detailWidth
-		m.detail.Height = paneHeight
+		m.tabsView.SetSize(m.width, m.height)
 		m.picker.Width = m.width
 		m.picker.Height = m.height
+		paneHeight := m.height - 4
 		m.signalsView.SetSize(m.width, paneHeight)
 		m.snapshotsView.SetSize(m.width, paneHeight)
 		return m, nil
 
-	case tea.MouseMsg:
-		// Determine which pane the mouse is over based on X position.
-		// Tree pane occupies roughly 0..treeWidth, detail pane is the rest.
-		treeWidth := m.width * 60 / 100
-		onDetail := msg.X > treeWidth+1
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			if onDetail {
-				m.detail.ScrollUp()
-			} else {
-				m.tree.MoveUp()
-				m.detail.Scroll = 0
-				m.refreshSignals()
-			}
-		case tea.MouseButtonWheelDown:
-			if onDetail {
-				m.detail.ScrollDown()
-			} else {
-				m.tree.MoveDown()
-				m.detail.Scroll = 0
-				m.refreshSignals()
-			}
-		}
-		return m, nil
-
 	case tea.KeyMsg:
-		// 1/2/3 switches views, Tab toggles pane focus (when no modal)
+		// View switching and global keys (when no modal)
 		if !m.showPicker && !m.showGroupPicker && !m.showFilterPicker {
 			switch msg.String() {
 			case "1":
 				if m.activeView != ViewTabs {
 					m.activeView = ViewTabs
-					m.focusDetail = false
-					m.detail.Scroll = 0
+					m.tabsView.focusDetail = false
+					m.tabsView.detail.Scroll = 0
 				}
 				return m, nil
 			case "2":
 				if m.activeView != ViewSignals {
 					m.activeView = ViewSignals
-					m.focusDetail = false
-					m.detail.Scroll = 0
 					return m, m.signalsView.Reload()
 				}
 				return m, nil
 			case "3":
 				if m.activeView != ViewSnapshots {
 					m.activeView = ViewSnapshots
-					m.focusDetail = false
-					m.detail.Scroll = 0
 					return m, m.snapshotsView.SetProfile(m.profile.Name)
 				}
 				return m, nil
-			case "tab", "shift+tab":
-				switch m.activeView {
-				case ViewTabs:
-					if m.focusDetail {
-						m.focusDetail = false
-						m.detail.Scroll = 0
-					} else {
-						node := m.tree.SelectedNode()
-						if node != nil && (node.Tab != nil || node.Group != nil) {
-							m.focusDetail = true
-						}
-					}
-				case ViewSignals:
-					m.signalsView.focusDetail = !m.signalsView.focusDetail
-					if !m.signalsView.focusDetail {
-						m.signalsView.detail.Scroll = 0
-					}
-				case ViewSnapshots:
-					m.snapshotsView.focusDetail = !m.snapshotsView.focusDetail
-					if !m.snapshotsView.focusDetail {
-						m.snapshotsView.detail.Scroll = 0
-					}
-				}
-				return m, nil
 			}
 		}
 
-		// Delegate to active view (skip when modal is open)
-		if !m.showPicker && !m.showGroupPicker && !m.showFilterPicker {
-			if m.activeView == ViewSignals {
-				if msg.String() == "q" || msg.String() == "ctrl+c" {
-					return m, tea.Quit
-				}
-				if msg.String() != "p" {
-					v, cmd := m.signalsView.Update(msg)
-					m.signalsView = v
-					return m, cmd
-				}
-			}
-			if m.activeView == ViewSnapshots {
-				if msg.String() == "q" || msg.String() == "ctrl+c" {
-					return m, tea.Quit
-				}
-				if msg.String() != "p" {
-					v, cmd := m.snapshotsView.Update(msg)
-					m.snapshotsView = v
-					return m, cmd
-				}
-			}
-		}
-
-		// Detail pane focus mode
-		if m.focusDetail {
-			// Signal navigation when viewing a signal-source tab.
-			if m.signalSource != "" && len(m.signals) > 0 {
-				switch msg.String() {
-				case "j", "down":
-					if m.signalCursor < len(m.signals)-1 {
-						m.signalCursor++
-					}
-					m.scrollDetailToSignalCursor()
-					return m, nil
-				case "k", "up":
-					if m.signalCursor > 0 {
-						m.signalCursor--
-					}
-					m.scrollDetailToSignalCursor()
-					return m, nil
-				case "enter":
-					if m.mode == ModeLive && m.connected {
-						sig := m.signals[m.signalCursor]
-						tab := m.findTabForSource(m.signalSource)
-						if tab != nil && tab.BrowserID != 0 {
-							return m, navigateSignalCmd(m.server, tab.BrowserID, m.signalSource, sig.Title)
-						}
-					}
-					return m, nil
-				case "x":
-					sig := m.signals[m.signalCursor]
-					if sig.CompletedAt == nil {
-						return m, completeSignalCmd(m.db, sig.ID, m.signalSource)
-					}
-					return m, nil
-				case "u":
-					sig := m.signals[m.signalCursor]
-					if sig.CompletedAt != nil {
-						return m, reopenSignalCmd(m.db, sig.ID, m.signalSource)
-					}
-					return m, nil
-				case "esc":
-					m.focusDetail = false
-					m.detail.Scroll = 0
-					return m, nil
-				case "q", "ctrl+c":
-					return m, tea.Quit
-				case "c":
-					// Fall through to main 'c' handler below by breaking out
-				default:
-					return m, nil
-				}
-			} else {
-				// Existing non-signal detail focus handling
-				switch msg.String() {
-				case "esc":
-					m.focusDetail = false
-					m.detail.Scroll = 0
-					return m, nil
-				case "j", "down":
-					m.detail.ScrollDown()
-					return m, nil
-				case "k", "up":
-					m.detail.ScrollUp()
-					return m, nil
-				case "s":
-					// fall through to main handler
-				case "q", "ctrl+c":
-					return m, tea.Quit
-				default:
-					return m, nil
-				}
-			}
-		}
-
-		// Group picker mode
+		// Modal handling
 		if m.showGroupPicker {
-			switch msg.String() {
-			case "up", "k":
-				m.groupPicker.MoveUp()
-			case "down", "j":
-				m.groupPicker.MoveDown()
-			case "enter":
-				group := m.groupPicker.Selected()
-				if group != nil {
-					ids := m.selectedOrCurrentTabIDs()
-					groupID, _ := strconv.Atoi(group.ID)
-					m.showGroupPicker = false
-					m.selected = make(map[int]bool)
-					return m, sendCmd(m.server, server.OutgoingMsg{
-						Action:  "move",
-						TabIDs:  ids,
-						GroupID: groupID,
-					})
-				}
-			case "esc":
-				m.showGroupPicker = false
-			case "q", "ctrl+c":
-				return m, tea.Quit
-			}
-			return m, nil
+			return m.updateGroupPicker(msg)
 		}
-
-		// Filter picker mode
 		if m.showFilterPicker {
-			switch msg.String() {
-			case "up", "k":
-				m.filterPicker.MoveUp()
-			case "down", "j":
-				m.filterPicker.MoveDown()
-			case "enter":
-				m.tree.SetFilter(m.filterPicker.Selected().Mode)
-				m.showFilterPicker = false
-			case "esc":
-				m.showFilterPicker = false
-			case "q", "ctrl+c":
-				return m, tea.Quit
-			}
-			return m, nil
+			return m.updateFilterPicker(msg)
 		}
-
-		// Source picker mode
 		if m.showPicker {
-			switch msg.String() {
-			case "up", "k":
-				m.picker.MoveUp()
-			case "down", "j":
-				m.picker.MoveDown()
-			case "enter":
-				src := m.picker.Selected()
-				m.showPicker = false
-				m.loading = true
-				if src.IsLive {
-					m.mode = ModeLive
-					return m, m.startLiveMode()
-				}
-				m.mode = ModeOffline
-				m.profile = *src.Profile
-				return m, loadSession(m.profile)
-			case "esc":
-				if m.session != nil {
-					m.showPicker = false
-				}
-			case "q", "ctrl+c":
-				return m, tea.Quit
-			case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-				n := int(msg.String()[0] - '0')
-				if m.picker.SelectByNumber(n) {
-					src := m.picker.Selected()
-					m.showPicker = false
-					m.loading = true
-					if src.IsLive {
-						m.mode = ModeLive
-						return m, m.startLiveMode()
-					}
-					m.mode = ModeOffline
-					m.profile = *src.Profile
-					return m, loadSession(m.profile)
-				}
-			}
-			return m, nil
+			return m.updateSourcePicker(msg)
 		}
 
+		// Global keys handled before view delegation
 		switch msg.String() {
 		case "q", "ctrl+c":
+			if m.cancel != nil {
+				m.cancel()
+			}
 			return m, tea.Quit
-		case "up", "k":
-			m.tree.MoveUp()
-			m.refreshSignals()
-		case "down", "j":
-			m.tree.MoveDown()
-			m.refreshSignals()
-		case "enter":
-			if m.mode == ModeLive && m.connected {
-				node := m.tree.SelectedNode()
-				if node != nil && node.Tab != nil {
-					return m, sendCmd(m.server, server.OutgoingMsg{
-						Action: "focus",
-						TabID:  node.Tab.BrowserID,
-					})
-				}
-			}
-			node := m.tree.SelectedNode()
-			if node != nil && node.Group != nil {
-				m.tree.Toggle()
-			} else if node != nil && node.Tab != nil {
-				m.focusDetail = true
-			}
-		case "h":
-			m.tree.CollapseOrParent()
-		case "l":
-			m.tree.ExpandOrEnter()
-		case "s":
-			node := m.tree.SelectedNode()
-			if node != nil && node.Tab != nil {
-				url := node.Tab.URL
-				if _, exists := m.summarizeJobs[url]; exists {
-					break // already in progress
-				}
-				delete(m.summarizeErrors, url)
-				job := &SummarizeJob{Tab: node.Tab}
-				m.summarizeJobs[url] = job
-				if m.mode == ModeLive && m.connected {
-					id, cmd := sendCmdWithID(m.server, server.OutgoingMsg{
-						Action: "get-content",
-						TabID:  node.Tab.BrowserID,
-					})
-					job.ContentID = id
-					return m, cmd
-				}
-				return m, runSummarizeTab(node.Tab, m.summaryDir, m.ollamaModel, m.ollamaHost)
-			}
-		case "c":
-			if m.mode != ModeLive || !m.connected {
-				break
-			}
-			node := m.tree.SelectedNode()
-			if node == nil || node.Tab == nil {
-				break
-			}
-			source := signal.DetectSource(node.Tab.URL)
-			if source == "" {
-				break
-			}
-			alreadyQueued := false
-			for _, j := range m.signalQueue {
-				if j.Tab.BrowserID == node.Tab.BrowserID {
-					alreadyQueued = true
-					break
-				}
-			}
-			if alreadyQueued {
-				break
-			}
-			if m.signalActive != nil && m.signalActive.Tab.BrowserID == node.Tab.BrowserID {
-				break
-			}
-			delete(m.signalErrors, source)
-			job := &SignalJob{Tab: node.Tab, Source: source}
-			m.signalQueue = append(m.signalQueue, job)
-			return m, m.processNextSignal()
-		case "f":
-			m.showFilterPicker = true
-			m.filterPicker = NewFilterPicker(m.tree.Filter)
-			m.filterPicker.Width = m.width
-			m.filterPicker.Height = m.height
-		case "r":
-			if m.mode == ModeLive {
-				// In live mode, the extension will re-send a snapshot on reconnect.
-				// For now, just re-listen — the extension auto-sends on connect.
-				return m, nil
-			}
-			m.loading = true
-			return m, loadSession(m.profile)
-		case "x":
-			if m.mode != ModeLive || !m.connected {
-				return m, nil
-			}
-			ids := m.selectedOrCurrentTabIDs()
-			if len(ids) == 0 {
-				return m, nil
-			}
-			return m, sendCmd(m.server, server.OutgoingMsg{
-				Action: "close",
-				TabIDs: ids,
-			})
-		case " ":
-			if m.mode != ModeLive || !m.connected {
-				return m, nil
-			}
-			node := m.tree.SelectedNode()
-			if node != nil && node.Tab != nil && node.Tab.BrowserID != 0 {
-				id := node.Tab.BrowserID
-				if m.selected[id] {
-					delete(m.selected, id)
-				} else {
-					m.selected[id] = true
-				}
-			}
-			m.tree.MoveDown()
-			m.refreshSignals()
-		case "g":
-			if m.mode != ModeLive || !m.connected || m.session == nil {
-				return m, nil
-			}
-			ids := m.selectedOrCurrentTabIDs()
-			if len(ids) == 0 {
-				return m, nil
-			}
-			m.showGroupPicker = true
-			m.groupPicker = NewGroupPicker(m.session.Groups)
-			m.groupPicker.Width = m.width
-			m.groupPicker.Height = m.height
-		case "esc":
-			if m.focusDetail {
-				m.focusDetail = false
-				m.detail.Scroll = 0
-			} else {
-				m.selected = make(map[int]bool)
-			}
 		case "p":
 			m.showPicker = true
 			m.picker = NewSourcePicker(m.profiles)
 			m.picker.Width = m.width
 			m.picker.Height = m.height
+			return m, nil
+		}
+
+		// Delegate to active view
+		switch m.activeView {
+		case ViewTabs:
+			v, cmd := m.tabsView.Update(msg)
+			m.tabsView = v
+			return m, cmd
+
+		case ViewSignals:
+			v, cmd := m.signalsView.Update(msg)
+			m.signalsView = v
+			return m, cmd
+
+		case ViewSnapshots:
+			v, cmd := m.snapshotsView.Update(msg)
+			m.snapshotsView = v
+			return m, cmd
 		}
 		return m, nil
 
+	case tea.MouseMsg:
+		if m.activeView == ViewTabs {
+			v, cmd := m.tabsView.Update(msg)
+			m.tabsView = v
+			return m, cmd
+		}
+		return m, nil
+
+	// --- Custom messages from TabsView ---
+	case showGroupPickerMsg:
+		m.showGroupPicker = true
+		m.groupPicker = NewGroupPicker(m.session.Groups)
+		m.groupPicker.Width = m.width
+		m.groupPicker.Height = m.height
+		return m, nil
+
+	case showFilterPickerMsg:
+		m.showFilterPicker = true
+		m.filterPicker = NewFilterPicker(m.tabsView.tree.Filter)
+		m.filterPicker.Width = m.width
+		m.filterPicker.Height = m.height
+		return m, nil
+
+	case reloadSessionMsg:
+		m.loading = true
+		return m, loadSession(m.profile)
+
+	// --- Async results ---
 	case sessionLoadedMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -911,21 +554,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.session = msg.data
 		m.profile = msg.data.Profile
+		m.tabsView.session = m.session
+		m.tabsView.mode = m.mode
+		m.tabsView.connected = m.connected
 
-		// Run synchronous analyzers
 		analyzer.AnalyzeStale(m.session.AllTabs, m.staleDays)
 		analyzer.AnalyzeDuplicates(m.session.AllTabs)
-		m.stats = analyzer.ComputeStats(m.session)
+		m.tabsView.stats = analyzer.ComputeStats(m.session)
+		m.tabsView.RebuildTree()
 
-		// Set up tree
-		m.rebuildTree()
-
-		// Notify snapshots view of profile change
 		snapshotsCmd := m.snapshotsView.SetProfile(m.profile.Name)
 
-		// Start async checks
-		m.deadChecking = true
-		m.githubChecking = true
+		m.tabsView.deadChecking = true
+		m.tabsView.githubChecking = true
 		return m, tea.Batch(
 			runDeadLinkChecks(m.session.AllTabs),
 			runGitHubChecks(m.session.AllTabs),
@@ -933,24 +574,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case analysisCompleteMsg:
-		m.deadChecking = false
-		m.stats = analyzer.ComputeStats(m.session)
+		m.tabsView.deadChecking = false
+		m.tabsView.stats = analyzer.ComputeStats(m.session)
 		return m, nil
 
 	case githubAnalysisCompleteMsg:
-		m.githubChecking = false
-		m.stats = analyzer.ComputeStats(m.session)
+		m.tabsView.githubChecking = false
+		m.tabsView.stats = analyzer.ComputeStats(m.session)
 		return m, nil
 
 	case summarizeCompleteMsg:
-		job := m.summarizeJobs[msg.url]
+		job := m.tabsView.summarizeJobs[msg.url]
 		popupID := ""
 		if job != nil {
 			popupID = job.PopupRequestID
 		}
-		delete(m.summarizeJobs, msg.url)
+		delete(m.tabsView.summarizeJobs, msg.url)
 		if msg.err != nil {
-			m.summarizeErrors[msg.url] = msg.err.Error()
+			m.tabsView.summarizeErrors[msg.url] = msg.err.Error()
 			if popupID != "" {
 				m.server.Send(server.OutgoingMsg{
 					ID:     popupID,
@@ -959,7 +600,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 		} else {
-			delete(m.summarizeErrors, msg.url)
+			delete(m.tabsView.summarizeErrors, msg.url)
 			if popupID != "" {
 				m.server.Send(server.OutgoingMsg{
 					ID:      popupID,
@@ -973,34 +614,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case signalCompleteMsg:
 		if msg.err != nil {
 			applog.Error("tui.signal", msg.err, "source", msg.source)
-			m.signalErrors[msg.source] = msg.err.Error()
+			m.tabsView.signalErrors[msg.source] = msg.err.Error()
 		} else {
 			applog.Info("tui.signal", "source", msg.source)
-			delete(m.signalErrors, msg.source)
+			delete(m.tabsView.signalErrors, msg.source)
 		}
-		// Reload signals for current source.
-		if m.signalSource != "" {
-			m.signals, _ = storage.ListSignals(m.db, m.signalSource, true)
+		if m.tabsView.signalSource != "" {
+			m.tabsView.signals, _ = storage.ListSignals(m.db, m.tabsView.signalSource, true)
 		}
-		m.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
-		return m, m.processNextSignal()
+		m.tabsView.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
+		return m, m.tabsView.processNextSignal()
 
 	case signalActionMsg:
 		if msg.err != nil {
-			m.signalErrors[msg.source] = msg.err.Error()
+			m.tabsView.signalErrors[msg.source] = msg.err.Error()
 		}
-		// Reload signals.
-		if m.signalSource != "" {
-			m.signals, _ = storage.ListSignals(m.db, m.signalSource, true)
-			if m.signalCursor >= len(m.signals) {
-				m.signalCursor = len(m.signals) - 1
+		if m.tabsView.signalSource != "" {
+			m.tabsView.signals, _ = storage.ListSignals(m.db, m.tabsView.signalSource, true)
+			if m.tabsView.signalCursor >= len(m.tabsView.signals) {
+				m.tabsView.signalCursor = len(m.tabsView.signals) - 1
 			}
-			if m.signalCursor < 0 {
-				m.signalCursor = 0
+			if m.tabsView.signalCursor < 0 {
+				m.tabsView.signalCursor = 0
 			}
 		}
-		m.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
-		// Also route to signals view if active
+		m.tabsView.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
 		if m.activeView == ViewSignals {
 			v, cmd := m.signalsView.Update(msg)
 			m.signalsView = v
@@ -1010,7 +648,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case signalNavigateMsg:
 		if m.mode == ModeLive && m.connected {
-			tab := m.findTabForSource(msg.Source)
+			tab := m.tabsView.findTabForSource(msg.Source)
 			if tab != nil && tab.BrowserID != 0 {
 				return m, navigateSignalCmd(m.server, tab.BrowserID, msg.Source, msg.Title)
 			}
@@ -1018,22 +656,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case signalPollTickMsg:
-		return m, m.queueSignalPoll()
+		return m, m.tabsView.queueSignalPoll()
 
+	case rebuildTickMsg:
+		m.doRebuild()
+		return m, nil
+
+	// --- WebSocket messages ---
 	case wsSnapshotMsg:
 		m.loading = false
 		m.connected = true
 		m.session = msg.data
+		m.tabsView.session = m.session
+		m.tabsView.mode = m.mode
+		m.tabsView.connected = m.connected
 		applog.Info("tui.snapshot", "tabs", len(msg.data.AllTabs), "groups", len(msg.data.Groups))
 
 		analyzer.AnalyzeStale(m.session.AllTabs, m.staleDays)
 		analyzer.AnalyzeDuplicates(m.session.AllTabs)
-		m.stats = analyzer.ComputeStats(m.session)
+		m.tabsView.stats = analyzer.ComputeStats(m.session)
+		m.tabsView.RebuildTree()
 
-		m.rebuildTree()
-
-		m.deadChecking = true
-		m.githubChecking = true
+		m.tabsView.deadChecking = true
+		m.tabsView.githubChecking = true
 		return m, tea.Batch(
 			runDeadLinkChecks(m.session.AllTabs),
 			runGitHubChecks(m.session.AllTabs),
@@ -1043,14 +688,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wsDisconnectedMsg:
 		m.connected = false
-		// Clear any in-flight signal job
-		if m.signalActive != nil {
-			m.signalErrors[m.signalActive.Source] = "disconnected"
-			m.signalActive = nil
+		m.tabsView.connected = false
+		if m.tabsView.signalActive != nil {
+			m.tabsView.signalErrors[m.tabsView.signalActive.Source] = "disconnected"
+			m.tabsView.signalActive = nil
 		}
-		m.signalQueue = nil
+		m.tabsView.signalQueue = nil
 		var cmds []tea.Cmd
-		for _, job := range m.summarizeJobs {
+		for _, job := range m.tabsView.summarizeJobs {
 			if job.ContentID != "" {
 				job.ContentID = ""
 				cmds = append(cmds, runSummarizeTab(job.Tab, m.summaryDir, m.ollamaModel, m.ollamaHost))
@@ -1067,29 +712,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case wsTabRemovedMsg:
 		if m.session != nil {
 			m.removeTab(msg.tabID)
-			analyzer.AnalyzeDuplicates(m.session.AllTabs)
-			m.stats = analyzer.ComputeStats(m.session)
-			m.rebuildTree()
+			return m, tea.Batch(listenWebSocket(m.server), m.scheduleRebuild())
 		}
 		return m, listenWebSocket(m.server)
 
 	case wsTabCreatedMsg:
 		if m.session != nil {
 			m.addTab(msg.tab)
-			analyzer.AnalyzeStale(m.session.AllTabs, m.staleDays)
-			analyzer.AnalyzeDuplicates(m.session.AllTabs)
-			m.stats = analyzer.ComputeStats(m.session)
-			m.rebuildTree()
+			return m, tea.Batch(listenWebSocket(m.server), m.scheduleRebuild())
 		}
 		return m, listenWebSocket(m.server)
 
 	case wsTabUpdatedMsg:
 		if m.session != nil {
 			m.updateTab(msg.tab)
-			analyzer.AnalyzeStale(m.session.AllTabs, m.staleDays)
-			analyzer.AnalyzeDuplicates(m.session.AllTabs)
-			m.stats = analyzer.ComputeStats(m.session)
-			m.rebuildTree()
+			return m, tea.Batch(listenWebSocket(m.server), m.scheduleRebuild())
 		}
 		return m, listenWebSocket(m.server)
 
@@ -1106,20 +743,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tab := m.findTabByBrowserID(msg.tabID)
 		if tab == nil {
 			m.server.Send(server.OutgoingMsg{
-				ID:    msg.id,
+				ID:     msg.id,
 				Action: "summarize-result",
-				Error: "Tab not found",
+				Error:  "Tab not found",
 			})
 			return m, listenWebSocket(m.server)
 		}
-		// Check if already in progress
-		if existing, ok := m.summarizeJobs[tab.URL]; ok {
+		if existing, ok := m.tabsView.summarizeJobs[tab.URL]; ok {
 			existing.PopupRequestID = msg.id
 			return m, listenWebSocket(m.server)
 		}
-		// Start summarization
 		job := &SummarizeJob{Tab: tab, PopupRequestID: msg.id}
-		m.summarizeJobs[tab.URL] = job
+		m.tabsView.summarizeJobs[tab.URL] = job
 		if m.mode == ModeLive && m.connected {
 			id, cmd := sendCmdWithID(m.server, server.OutgoingMsg{
 				Action: "get-content",
@@ -1135,27 +770,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wsCmdResponseMsg:
 		applog.Info("tui.cmdResponse", "id", msg.id, "ok", msg.ok)
-		// Check if this response matches a signal job
-		if m.signalActive != nil && m.signalActive.ContentID == msg.id {
-			source := m.signalActive.Source
-			m.signalActive = nil
+		if m.tabsView.signalActive != nil && m.tabsView.signalActive.ContentID == msg.id {
+			source := m.tabsView.signalActive.Source
+			m.tabsView.signalActive = nil
 			if !msg.ok {
-				m.signalErrors[source] = msg.error
-				return m, tea.Batch(listenWebSocket(m.server), m.processNextSignal())
+				m.tabsView.signalErrors[source] = msg.error
+				return m, tea.Batch(listenWebSocket(m.server), m.tabsView.processNextSignal())
 			}
 			items, err := signal.ParseItemsJSON(msg.items)
 			if err != nil {
-				m.signalErrors[source] = err.Error()
-				return m, tea.Batch(listenWebSocket(m.server), m.processNextSignal())
+				m.tabsView.signalErrors[source] = err.Error()
+				return m, tea.Batch(listenWebSocket(m.server), m.tabsView.processNextSignal())
 			}
-			// Empty items is valid: means nothing unread. Reconcile to auto-complete active signals.
 			return m, tea.Batch(
 				listenWebSocket(m.server),
 				runReconcileSignals(m.db, source, items, time.Now()),
 			)
 		}
-		// Check if this response matches a summarize job
-		for _, job := range m.summarizeJobs {
+		for _, job := range m.tabsView.summarizeJobs {
 			if job.ContentID != "" && job.ContentID == msg.id {
 				tab := job.Tab
 				job.ContentID = ""
@@ -1166,7 +798,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						runSummarizeWithContent(tab, content, m.summaryDir, m.ollamaModel, m.ollamaHost),
 					)
 				}
-				// Fallback to HTTP fetch
 				return m, tea.Batch(
 					listenWebSocket(m.server),
 					runSummarizeTab(tab, m.summaryDir, m.ollamaModel, m.ollamaHost),
@@ -1194,225 +825,94 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// scrollDetailToSignalCursor adjusts detail pane scroll so the signal cursor is visible.
-// Signal items start after the tab info header in the rendered content.
-// We estimate the line offset: ViewTab produces ~8 lines, then header + blank = 2 more,
-// then 1 line per signal.
-func (m *Model) scrollDetailToSignalCursor() {
-	headerLines := 10 // approximate lines before signal list items
-	cursorLine := headerLines + m.signalCursor
-	if cursorLine < m.detail.Scroll {
-		m.detail.Scroll = cursorLine
-	} else if cursorLine >= m.detail.Scroll+m.detail.Height-1 {
-		m.detail.Scroll = cursorLine - m.detail.Height + 2
-	}
-	if m.detail.Scroll < 0 {
-		m.detail.Scroll = 0
-	}
-}
+// --- Modal handlers ---
 
-func (m *Model) refreshSignals() {
-	node := m.tree.SelectedNode()
-	var source string
-	if node != nil && node.Tab != nil {
-		source = signal.DetectSource(node.Tab.URL)
-	}
-	if source != m.signalSource {
-		m.signalSource = source
-		m.signalCursor = 0
-		if source != "" && m.db != nil {
-			m.signals, _ = storage.ListSignals(m.db, source, true)
-		} else {
-			m.signals = nil
+func (m Model) updateGroupPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		m.groupPicker.MoveUp()
+	case "down", "j":
+		m.groupPicker.MoveDown()
+	case "enter":
+		group := m.groupPicker.Selected()
+		if group != nil {
+			ids := m.tabsView.selectedOrCurrentTabIDs()
+			groupID, _ := strconv.Atoi(group.ID)
+			m.showGroupPicker = false
+			m.tabsView.selected = make(map[int]bool)
+			return m, sendCmd(m.server, server.OutgoingMsg{
+				Action:  "move",
+				TabIDs:  ids,
+				GroupID: groupID,
+			})
 		}
+	case "esc":
+		m.showGroupPicker = false
+	case "q", "ctrl+c":
+		return m, tea.Quit
 	}
+	return m, nil
 }
 
-func (m *Model) findTabForSource(source string) *types.Tab {
-	if m.session == nil {
-		return nil
+func (m Model) updateFilterPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		m.filterPicker.MoveUp()
+	case "down", "j":
+		m.filterPicker.MoveDown()
+	case "enter":
+		m.tabsView.tree.SetFilter(m.filterPicker.Selected().Mode)
+		m.showFilterPicker = false
+	case "esc":
+		m.showFilterPicker = false
+	case "q", "ctrl+c":
+		return m, tea.Quit
 	}
-	for _, tab := range m.session.AllTabs {
-		if signal.DetectSource(tab.URL) == source {
-			return tab
+	return m, nil
+}
+
+func (m Model) updateSourcePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		m.picker.MoveUp()
+	case "down", "j":
+		m.picker.MoveDown()
+	case "enter":
+		src := m.picker.Selected()
+		m.showPicker = false
+		m.loading = true
+		if src.IsLive {
+			m.mode = ModeLive
+			return m, m.startLiveMode()
 		}
-	}
-	return nil
-}
-
-func navigateSignalCmd(srv *server.Server, tabID int, source, title string) tea.Cmd {
-	return sendCmd(srv, server.OutgoingMsg{
-		Action: "navigate-signal",
-		TabID:  tabID,
-		Source: source,
-		Title:  title,
-	})
-}
-
-func (m *Model) findTabByBrowserID(browserID int) *types.Tab {
-	if m.session == nil {
-		return nil
-	}
-	for _, t := range m.session.AllTabs {
-		if t.BrowserID == browserID {
-			return t
+		m.mode = ModeOffline
+		m.profile = *src.Profile
+		return m, loadSession(m.profile)
+	case "esc":
+		if m.session != nil {
+			m.showPicker = false
 		}
-	}
-	return nil
-}
-
-func (m *Model) buildTabInfoPayload(browserID int) *server.TabInfoPayload {
-	tab := m.findTabByBrowserID(browserID)
-	if tab == nil {
-		return nil
-	}
-	payload := &server.TabInfoPayload{
-		URL:          tab.URL,
-		Title:        tab.Title,
-		LastAccessed: tab.LastAccessed.Format("2006-01-02 15:04"),
-		StaleDays:    tab.StaleDays,
-		IsStale:      tab.IsStale,
-		IsDead:       tab.IsDead,
-		DeadReason:   tab.DeadReason,
-		IsDuplicate:  tab.IsDuplicate,
-		GitHubStatus: tab.GitHubStatus,
-	}
-	// Read summary if available
-	sumPath := summarize.SummaryPath(m.summaryDir, tab.URL, tab.Title)
-	if raw, err := summarize.ReadSummary(sumPath); err == nil {
-		payload.Summary = raw
-	}
-	// Check for signal source
-	source := signal.DetectSource(tab.URL)
-	if source != "" && m.db != nil {
-		payload.SignalSource = source
-		if signals, err := storage.ListSignals(m.db, source, false); err == nil {
-			for _, s := range signals {
-				payload.Signals = append(payload.Signals, server.SignalPayload{
-					ID:       s.ID,
-					Title:    s.Title,
-					Preview:  s.Preview,
-					Snippet:  s.Snippet,
-					SourceTS: s.SourceTS,
-					Active:   s.CompletedAt == nil,
-				})
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		n := int(msg.String()[0] - '0')
+		if m.picker.SelectByNumber(n) {
+			src := m.picker.Selected()
+			m.showPicker = false
+			m.loading = true
+			if src.IsLive {
+				m.mode = ModeLive
+				return m, m.startLiveMode()
 			}
+			m.mode = ModeOffline
+			m.profile = *src.Profile
+			return m, loadSession(m.profile)
 		}
 	}
-	return payload
+	return m, nil
 }
 
-func (m *Model) rebuildTree() {
-	oldCursor := m.tree.Cursor
-	oldOffset := m.tree.Offset
-	oldExpanded := m.tree.Expanded
-	oldFilter := m.tree.Filter
-	oldSavedExpanded := m.tree.SavedExpanded
-
-	m.tree = NewTreeModel(m.session.Groups)
-	m.tree.Width = m.width * 60 / 100
-	m.tree.Height = m.height - 4
-	m.tree.Filter = oldFilter
-	m.tree.SavedExpanded = oldSavedExpanded
-	m.tree.SummaryDir = m.summaryDir
-	if m.db != nil {
-		m.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
-	}
-
-	// Restore expanded state from before rebuild
-	if oldExpanded != nil {
-		for id, exp := range oldExpanded {
-			m.tree.Expanded[id] = exp
-		}
-	}
-
-	// Expand any new groups when a filter is active
-	if m.tree.Filter != types.FilterAll {
-		for _, g := range m.session.Groups {
-			if _, exists := oldExpanded[g.ID]; !exists {
-				m.tree.Expanded[g.ID] = true
-			}
-		}
-	}
-
-	// Clamp cursor to valid range
-	nodes := m.tree.VisibleNodes()
-	if oldCursor >= len(nodes) {
-		oldCursor = len(nodes) - 1
-	}
-	if oldCursor < 0 {
-		oldCursor = 0
-	}
-	m.tree.Cursor = oldCursor
-	m.tree.Offset = oldOffset
-	m.refreshSignals()
-}
-
-func (m *Model) removeTab(browserID int) {
-	for _, g := range m.session.Groups {
-		for i, t := range g.Tabs {
-			if t.BrowserID == browserID {
-				g.Tabs = append(g.Tabs[:i], g.Tabs[i+1:]...)
-				break
-			}
-		}
-	}
-	for i, t := range m.session.AllTabs {
-		if t.BrowserID == browserID {
-			m.session.AllTabs = append(m.session.AllTabs[:i], m.session.AllTabs[i+1:]...)
-			break
-		}
-	}
-	delete(m.selected, browserID)
-}
-
-func (m *Model) addTab(tab *types.Tab) {
-	m.session.AllTabs = append(m.session.AllTabs, tab)
-	// Try to place in matching group (skip empty GroupID — that means ungrouped)
-	placed := false
-	if tab.GroupID != "" {
-		for _, g := range m.session.Groups {
-			if g.ID == tab.GroupID {
-				g.Tabs = append(g.Tabs, tab)
-				placed = true
-				break
-			}
-		}
-	}
-	// Unmatched or empty GroupID → place in ungrouped group
-	if !placed {
-		tab.GroupID = ""
-		for _, g := range m.session.Groups {
-			if g.ID == "ungrouped" {
-				g.Tabs = append(g.Tabs, tab)
-				placed = true
-				break
-			}
-		}
-		if !placed {
-			ug := &types.TabGroup{ID: "ungrouped", Name: "Ungrouped", Tabs: []*types.Tab{tab}}
-			m.session.Groups = append(m.session.Groups, ug)
-		}
-	}
-}
-
-func (m *Model) updateTab(tab *types.Tab) {
-	for _, t := range m.session.AllTabs {
-		if t.BrowserID == tab.BrowserID {
-			t.URL = tab.URL
-			t.Title = tab.Title
-			t.LastAccessed = tab.LastAccessed
-			t.Favicon = tab.Favicon
-			t.TabIndex = tab.TabIndex
-			if t.GroupID != tab.GroupID {
-				m.removeTab(tab.BrowserID)
-				m.addTab(tab)
-			}
-			return
-		}
-	}
-	m.addTab(tab)
-}
+// --- View ---
 
 func (m Model) View() string {
 	if m.loading {
@@ -1425,11 +925,9 @@ func (m Model) View() string {
 	if m.showPicker {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.picker.View())
 	}
-
 	if m.showGroupPicker {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.groupPicker.View())
 	}
-
 	if m.showFilterPicker {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.filterPicker.View())
 	}
@@ -1442,7 +940,7 @@ func (m Model) View() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.picker.View())
 	}
 
-	// Navbar with inline stats
+	// Navbar
 	var profileName string
 	if m.mode == ModeLive {
 		if m.connected {
@@ -1456,37 +954,11 @@ func (m Model) View() string {
 
 	var statsStr string
 	if m.activeView == ViewTabs && m.session != nil {
-		statsStr = fmt.Sprintf("%d tabs \u00b7 %d groups", m.stats.TotalTabs, m.stats.TotalGroups)
-		if m.stats.DeadTabs > 0 {
-			statsStr += fmt.Sprintf(" \u00b7 %d dead", m.stats.DeadTabs)
-		}
-		if m.stats.StaleTabs > 0 {
-			statsStr += fmt.Sprintf(" \u00b7 %d stale", m.stats.StaleTabs)
-		}
-		if m.stats.DuplicateTabs > 0 {
-			statsStr += fmt.Sprintf(" \u00b7 %d dup", m.stats.DuplicateTabs)
-		}
-		if m.stats.GitHubDoneTabs > 0 {
-			statsStr += fmt.Sprintf(" \u00b7 %d done", m.stats.GitHubDoneTabs)
-		}
-		if m.deadChecking {
-			statsStr += " \u00b7 checking links..."
-		}
-		if m.githubChecking {
-			statsStr += " \u00b7 checking github..."
-		}
-		if n := len(m.summarizeJobs); n == 1 {
-			statsStr += " \u00b7 summarizing 1 tab..."
-		} else if n > 1 {
-			statsStr += fmt.Sprintf(" \u00b7 summarizing %d tabs...", n)
-		}
-		if m.signalActive != nil {
-			statsStr += " \u00b7 checking signals..."
-		}
+		statsStr = m.tabsView.StatsString()
 	}
 	var viewCounts [3]int
-	viewCounts[ViewTabs] = m.stats.TotalTabs
-	for _, c := range m.tree.SignalCounts {
+	viewCounts[ViewTabs] = m.tabsView.stats.TotalTabs
+	for _, c := range m.tabsView.tree.SignalCounts {
 		viewCounts[ViewSignals] += c
 	}
 	viewCounts[ViewSnapshots] = len(m.snapshotsView.snapshots)
@@ -1502,59 +974,9 @@ func (m Model) View() string {
 
 	switch m.activeView {
 	case ViewTabs:
-		if m.session == nil {
-			leftContent = "No session loaded"
-			rightContent = ""
-		} else {
-			isFocusDetail = m.focusDetail
-			// Render detail based on selection
-			var detailContent string
-			if node := m.tree.SelectedNode(); node != nil {
-				if node.Tab != nil {
-					if m.signalSource != "" {
-						isCapturing := m.signalActive != nil && m.signalActive.Source == m.signalSource
-						if !isCapturing {
-							for _, j := range m.signalQueue {
-								if j.Source == m.signalSource {
-									isCapturing = true
-									break
-								}
-							}
-						}
-						sigErr := m.signalErrors[m.signalSource]
-						detailContent = m.detail.ViewTabWithSignal(node.Tab, m.signals, m.signalCursor, isCapturing, sigErr)
-					} else {
-						var summaryText string
-						sumPath := summarize.SummaryPath(m.summaryDir, node.Tab.URL, node.Tab.Title)
-						if raw, err := summarize.ReadSummary(sumPath); err == nil {
-							r, _ := glamour.NewTermRenderer(
-								glamour.WithStylePath("dark"),
-								glamour.WithWordWrap(detailWidth-2),
-							)
-							if rendered, err := r.Render(raw); err == nil {
-								summaryText = rendered
-							} else {
-								summaryText = raw
-							}
-						}
-						_, isSummarizing := m.summarizeJobs[node.Tab.URL]
-						tabErr := m.summarizeErrors[node.Tab.URL]
-						detailContent = m.detail.ViewTabWithSummary(node.Tab, summaryText, isSummarizing, tabErr)
-					}
-				} else if node.Group != nil {
-					detailContent = m.detail.ViewGroup(node.Group)
-				}
-			}
-			rightContent = m.detail.ViewScrolled(detailContent)
-
-			m.tree.Selected = m.selected
-			summarizingURLs := make(map[string]bool, len(m.summarizeJobs))
-			for url := range m.summarizeJobs {
-				summarizingURLs[url] = true
-			}
-			m.tree.SummarizingURLs = summarizingURLs
-			leftContent = m.tree.View()
-		}
+		isFocusDetail = m.tabsView.FocusDetail()
+		leftContent = m.tabsView.ViewList()
+		rightContent = m.tabsView.ViewDetail()
 
 	case ViewSignals:
 		isFocusDetail = m.signalsView.FocusDetail()
@@ -1597,16 +1019,7 @@ func (m Model) View() string {
 	var bottomText string
 	switch m.activeView {
 	case ViewTabs:
-		if m.mode == ModeLive && m.connected {
-			selCount := len(m.selected)
-			if selCount > 0 {
-				bottomText = fmt.Sprintf("%d selected \u00b7 x close \u00b7 g move \u00b7 esc clear \u00b7 ", selCount)
-			}
-			bottomText += "space select \u00b7 enter focus \u00b7 "
-		}
-		filterNames := []string{"all", "stale", "dead", "duplicate", ">7d", ">30d", ">90d", "gh done", "summarized", "unsummarized"}
-		filterStr := fmt.Sprintf("[filter: %s]", filterNames[m.tree.Filter])
-		bottomText += "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 f filter \u00b7 r refresh \u00b7 p source \u00b7 q quit  " + filterStr
+		bottomText = m.tabsView.BottomBar()
 	case ViewSignals:
 		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 open \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
 	case ViewSnapshots:
@@ -1614,6 +1027,122 @@ func (m Model) View() string {
 	}
 	bottomBar := bottomBarStyle.Render(bottomText)
 
-	// Assemble
 	return lipgloss.JoinVertical(lipgloss.Left, navbar, panes, bottomBar)
+}
+
+// --- Session mutation helpers ---
+
+func (m *Model) removeTab(browserID int) {
+	for _, g := range m.session.Groups {
+		for i, t := range g.Tabs {
+			if t.BrowserID == browserID {
+				g.Tabs = append(g.Tabs[:i], g.Tabs[i+1:]...)
+				break
+			}
+		}
+	}
+	for i, t := range m.session.AllTabs {
+		if t.BrowserID == browserID {
+			m.session.AllTabs = append(m.session.AllTabs[:i], m.session.AllTabs[i+1:]...)
+			break
+		}
+	}
+	delete(m.tabsView.selected, browserID)
+}
+
+func (m *Model) addTab(tab *types.Tab) {
+	m.session.AllTabs = append(m.session.AllTabs, tab)
+	placed := false
+	if tab.GroupID != "" {
+		for _, g := range m.session.Groups {
+			if g.ID == tab.GroupID {
+				g.Tabs = append(g.Tabs, tab)
+				placed = true
+				break
+			}
+		}
+	}
+	if !placed {
+		tab.GroupID = ""
+		for _, g := range m.session.Groups {
+			if g.ID == "ungrouped" {
+				g.Tabs = append(g.Tabs, tab)
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			ug := &types.TabGroup{ID: "ungrouped", Name: "Ungrouped", Tabs: []*types.Tab{tab}}
+			m.session.Groups = append(m.session.Groups, ug)
+		}
+	}
+}
+
+func (m *Model) updateTab(tab *types.Tab) {
+	for _, t := range m.session.AllTabs {
+		if t.BrowserID == tab.BrowserID {
+			t.URL = tab.URL
+			t.Title = tab.Title
+			t.LastAccessed = tab.LastAccessed
+			t.Favicon = tab.Favicon
+			t.TabIndex = tab.TabIndex
+			if t.GroupID != tab.GroupID {
+				m.removeTab(tab.BrowserID)
+				m.addTab(tab)
+			}
+			return
+		}
+	}
+	m.addTab(tab)
+}
+
+func (m *Model) findTabByBrowserID(browserID int) *types.Tab {
+	if m.session == nil {
+		return nil
+	}
+	for _, t := range m.session.AllTabs {
+		if t.BrowserID == browserID {
+			return t
+		}
+	}
+	return nil
+}
+
+func (m *Model) buildTabInfoPayload(browserID int) *server.TabInfoPayload {
+	tab := m.findTabByBrowserID(browserID)
+	if tab == nil {
+		return nil
+	}
+	payload := &server.TabInfoPayload{
+		URL:          tab.URL,
+		Title:        tab.Title,
+		LastAccessed: tab.LastAccessed.Format("2006-01-02 15:04"),
+		StaleDays:    tab.StaleDays,
+		IsStale:      tab.IsStale,
+		IsDead:       tab.IsDead,
+		DeadReason:   tab.DeadReason,
+		IsDuplicate:  tab.IsDuplicate,
+		GitHubStatus: tab.GitHubStatus,
+	}
+	sumPath := summarize.SummaryPath(m.summaryDir, tab.URL, tab.Title)
+	if raw, err := summarize.ReadSummary(sumPath); err == nil {
+		payload.Summary = raw
+	}
+	source := signal.DetectSource(tab.URL)
+	if source != "" && m.db != nil {
+		payload.SignalSource = source
+		if signals, err := storage.ListSignals(m.db, source, false); err == nil {
+			for _, s := range signals {
+				payload.Signals = append(payload.Signals, server.SignalPayload{
+					ID:       s.ID,
+					Title:    s.Title,
+					Preview:  s.Preview,
+					Snippet:  s.Snippet,
+					SourceTS: s.SourceTS,
+					Active:   s.CompletedAt == nil,
+				})
+			}
+		}
+	}
+	return payload
 }
