@@ -1144,14 +1144,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(listenWebSocket(m.server), m.processNextSignal())
 			}
 			items, err := signal.ParseItemsJSON(msg.items)
-			if err != nil || len(items) == 0 {
-				errMsg := "no items found"
-				if err != nil {
-					errMsg = err.Error()
-				}
-				m.signalErrors[source] = errMsg
+			if err != nil {
+				m.signalErrors[source] = err.Error()
 				return m, tea.Batch(listenWebSocket(m.server), m.processNextSignal())
 			}
+			// Empty items is valid: means nothing unread. Reconcile to auto-complete active signals.
 			return m, tea.Batch(
 				listenWebSocket(m.server),
 				runReconcileSignals(m.db, source, items, time.Now()),

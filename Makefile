@@ -12,5 +12,8 @@ test:
 run: build
 	./$(BINARY)
 
+run-live: build
+	./$(BINARY) --live
+
 clean:
 	rm -f $(BINARY)

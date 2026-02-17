@@ -227,7 +227,8 @@ async function handleCommand(msg) {
           matrix: (title) => {
             const rooms = document.querySelectorAll(".mx_RoomTile");
             for (const room of rooms) {
-              const name = room.querySelector(".mx_RoomTile_title")?.textContent?.trim() || "";
+              const label = room.getAttribute("aria-label") || "";
+              const name = label.replace(/\s*Unread messages\.?\s*$/, "").trim();
               if (name === title) {
                 room.click();
                 return true;
@@ -282,11 +283,14 @@ async function handleCommand(msg) {
             const rooms = document.querySelectorAll(".mx_RoomTile");
             const items = [];
             rooms.forEach(room => {
-              const badge = room.querySelector(".mx_RoomTile_badge, .mx_NotificationBadge");
-              if (badge && badge.textContent?.trim() !== "0") {
-                const name = room.querySelector(".mx_RoomTile_title")?.textContent?.trim() || "";
-                items.push({ title: name, preview: badge.textContent?.trim() + " unread", timestamp: "" });
-              }
+              const label = room.getAttribute("aria-label") || "";
+              if (!label.includes("Unread messages")) return;
+              const name = label.replace(/\s*Unread messages\.?\s*$/, "").trim();
+              if (!name) return;
+              const badge = room.querySelector(".mx_NotificationBadge_count");
+              const count = badge?.textContent?.trim();
+              const preview = count ? count + " unread" : "unread";
+              items.push({ title: name, preview, timestamp: "" });
             });
             return items;
           },

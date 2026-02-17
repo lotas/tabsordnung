@@ -23,11 +23,17 @@ type SignalRecord struct {
 }
 
 // InsertSignal inserts a signal, silently ignoring duplicates (same source+title+source_ts).
+// If source_ts is empty, it is set to captured_at formatted as RFC3339 to give the signal
+// a unique episode identity.
 func InsertSignal(db *sql.DB, sig SignalRecord) error {
+	sourceTS := sig.SourceTS
+	if sourceTS == "" {
+		sourceTS = sig.CapturedAt.Format(time.RFC3339)
+	}
 	_, err := db.Exec(
 		`INSERT OR IGNORE INTO signals (source, title, preview, snippet, source_ts, captured_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		sig.Source, sig.Title, sig.Preview, sig.Snippet, sig.SourceTS, sig.CapturedAt,
+		sig.Source, sig.Title, sig.Preview, sig.Snippet, sourceTS, sig.CapturedAt,
 	)
 	return err
 }
@@ -123,11 +129,12 @@ func ReopenSignal(db *sql.DB, id int64) error {
 	return nil
 }
 
-// ReconcileSignals processes a scrape result for a source in a single transaction:
-// 1. Insert new items (dedup via INSERT OR IGNORE)
-// 2. Auto-complete signals missing from scrape (unless pinned)
-// 3. Reactivate auto-completed signals that reappear
-// Manually completed signals (auto_completed=0, completed_at IS NOT NULL) are never reactivated.
+// ReconcileSignals processes a scrape result for a source in a single transaction.
+// Each unread→read→unread cycle creates a distinct "episode" signal:
+// 1. Query active signals for this source
+// 2. Insert new episodes for scraped items that have no active signal (source_ts = capturedAt for uniqueness)
+// 3. Auto-complete active signals missing from scrape (unless pinned)
+// No reactivation — once completed, a signal stays completed and new unreads create a new episode.
 func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedAt time.Time) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -135,7 +142,29 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 	}
 	defer tx.Rollback()
 
-	// 1. Insert new items.
+	// 1. Query active signals for this source.
+	rows, err := tx.Query(
+		`SELECT id, title FROM signals WHERE source = ? AND completed_at IS NULL`, source)
+	if err != nil {
+		return err
+	}
+	activeTitles := make(map[string]bool)
+	for rows.Next() {
+		var id int64
+		var title string
+		if err := rows.Scan(&id, &title); err != nil {
+			rows.Close()
+			return err
+		}
+		activeTitles[title] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// 2. Insert new episodes for items without an active signal.
+	tsStr := capturedAt.Format(time.RFC3339)
 	insertStmt, err := tx.Prepare(
 		`INSERT OR IGNORE INTO signals (source, title, preview, snippet, source_ts, captured_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`)
@@ -144,56 +173,45 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 	}
 	defer insertStmt.Close()
 
+	scrapedTitles := make(map[string]bool)
 	for _, item := range items {
-		if _, err := insertStmt.Exec(source, item.Title, item.Preview, item.Snippet, item.SourceTS, capturedAt); err != nil {
+		scrapedTitles[item.Title] = true
+		if activeTitles[item.Title] {
+			continue // episode still running
+		}
+		sourceTS := item.SourceTS
+		if sourceTS == "" {
+			sourceTS = tsStr
+		}
+		if _, err := insertStmt.Exec(source, item.Title, item.Preview, item.Snippet, sourceTS, capturedAt); err != nil {
 			return err
 		}
 	}
 
-	// Build a set of current item keys for the WHERE NOT IN clause.
-	_, err = tx.Exec(`CREATE TEMP TABLE _current_items (title TEXT, source_ts TEXT)`)
-	if err != nil {
-		return err
-	}
-	tempStmt, err := tx.Prepare(`INSERT INTO _current_items (title, source_ts) VALUES (?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer tempStmt.Close()
-	for _, item := range items {
-		if _, err := tempStmt.Exec(item.Title, item.SourceTS); err != nil {
-			return err
-		}
-	}
-
-	// 2. Auto-complete active signals not in current scrape (unless pinned).
+	// 3. Auto-complete active signals not in current scrape (unless pinned).
 	_, err = tx.Exec(`
 		UPDATE signals
 		SET completed_at = CURRENT_TIMESTAMP, auto_completed = 1
 		WHERE source = ? AND completed_at IS NULL AND pinned = 0
-		  AND (title, source_ts) NOT IN (SELECT title, source_ts FROM _current_items)`,
-		source)
-	if err != nil {
-		return err
-	}
-
-	// 3. Reactivate auto-completed signals that reappear.
-	_, err = tx.Exec(`
-		UPDATE signals
-		SET completed_at = NULL, auto_completed = 0
-		WHERE source = ? AND auto_completed = 1 AND completed_at IS NOT NULL
-		  AND (title, source_ts) IN (SELECT title, source_ts FROM _current_items)`,
-		source)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec(`DROP TABLE _current_items`)
+		  AND title NOT IN (SELECT value FROM json_each(?))`,
+		source, titlesToJSON(scrapedTitles))
 	if err != nil {
 		return err
 	}
 
 	return tx.Commit()
+}
+
+// titlesToJSON converts a title set to a JSON array string for use with json_each().
+func titlesToJSON(titles map[string]bool) string {
+	parts := make([]string, 0, len(titles))
+	for t := range titles {
+		// Escape quotes in titles for JSON safety.
+		escaped := strings.ReplaceAll(t, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		parts = append(parts, `"`+escaped+`"`)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 // FormatSignalsMarkdown formats signals grouped by source as markdown.

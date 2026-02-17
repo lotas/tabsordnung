@@ -144,6 +144,7 @@ func TestReconcileSignals(t *testing.T) {
 		t.Fatalf("expected 3 active after scrape 1, got %d", len(active))
 	}
 
+	// Scrape 2: Alice disappears, Dave appears.
 	items2 := []SignalRecord{
 		{Title: "Bob", Preview: "sync", SourceTS: "3:00 PM"},
 		{Title: "CI Bot", Preview: "build failed", SourceTS: "3:15 PM"},
@@ -178,28 +179,80 @@ func TestReconcileSignals(t *testing.T) {
 	if !aliceSig.AutoCompleted {
 		t.Fatal("expected auto_completed=true for Alice")
 	}
+}
 
-	items3 := []SignalRecord{
-		{Title: "Alice", Preview: "alert1", SourceTS: "2:30 PM"},
-		{Title: "Bob", Preview: "sync", SourceTS: "3:00 PM"},
+func TestReconcileSignals_EpisodeBased(t *testing.T) {
+	db := testDB(t)
+
+	// Scrape 1: #random is unread.
+	t1 := time.Date(2026, 2, 17, 13, 0, 0, 0, time.UTC)
+	items1 := []SignalRecord{
+		{Title: "#random", Preview: "unread"},
 	}
-	err = ReconcileSignals(db, "gmail", items3, now)
-	if err != nil {
+	if err := ReconcileSignals(db, "slack", items1, t1); err != nil {
+		t.Fatalf("Reconcile 1: %v", err)
+	}
+
+	active, _ := ListSignals(db, "slack", false)
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active, got %d", len(active))
+	}
+	episode1ID := active[0].ID
+
+	// Scrape 2: still unread — same episode, no new signal.
+	t2 := time.Date(2026, 2, 17, 14, 0, 0, 0, time.UTC)
+	if err := ReconcileSignals(db, "slack", items1, t2); err != nil {
+		t.Fatalf("Reconcile 2: %v", err)
+	}
+
+	active, _ = ListSignals(db, "slack", false)
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active (same episode), got %d", len(active))
+	}
+	if active[0].ID != episode1ID {
+		t.Fatal("expected same signal ID for continuing episode")
+	}
+
+	// Scrape 3: user read #random, channel gone from scrape.
+	t3 := time.Date(2026, 2, 17, 14, 30, 0, 0, time.UTC)
+	if err := ReconcileSignals(db, "slack", []SignalRecord{}, t3); err != nil {
 		t.Fatalf("Reconcile 3: %v", err)
 	}
 
-	active, _ = ListSignals(db, "gmail", false)
-	foundAlice := false
-	for _, s := range active {
-		if s.Title == "Alice" {
-			foundAlice = true
-			if s.CompletedAt != nil {
-				t.Error("expected Alice to be active again")
-			}
-		}
+	active, _ = ListSignals(db, "slack", false)
+	if len(active) != 0 {
+		t.Fatalf("expected 0 active after read, got %d", len(active))
 	}
-	if !foundAlice {
-		t.Fatal("expected Alice in active list after reappearing")
+
+	// Scrape 4: new unreads in #random — should create NEW episode, not reactivate.
+	t4 := time.Date(2026, 2, 17, 15, 0, 0, 0, time.UTC)
+	if err := ReconcileSignals(db, "slack", items1, t4); err != nil {
+		t.Fatalf("Reconcile 4: %v", err)
+	}
+
+	active, _ = ListSignals(db, "slack", false)
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active (new episode), got %d", len(active))
+	}
+	if active[0].ID == episode1ID {
+		t.Fatal("expected new signal ID for new episode, got same as episode 1")
+	}
+
+	// Scrape 5: still unread — same new episode.
+	t5 := time.Date(2026, 2, 17, 16, 0, 0, 0, time.UTC)
+	if err := ReconcileSignals(db, "slack", items1, t5); err != nil {
+		t.Fatalf("Reconcile 5: %v", err)
+	}
+
+	active, _ = ListSignals(db, "slack", false)
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active (same new episode), got %d", len(active))
+	}
+
+	// Total: 2 signals (1 completed episode + 1 active episode).
+	all, _ := ListSignals(db, "slack", true)
+	if len(all) != 2 {
+		t.Fatalf("expected 2 total signals (2 episodes), got %d", len(all))
 	}
 }
 
@@ -262,25 +315,36 @@ func TestSignalSnippet(t *testing.T) {
 	}
 }
 
-func TestReconcileSignals_ManuallyCompletedStaysCompleted(t *testing.T) {
+func TestReconcileSignals_ManualCompleteCreatesNewEpisode(t *testing.T) {
 	db := testDB(t)
 
-	now := time.Now()
-
-	items1 := []SignalRecord{
-		{Title: "Alice", Preview: "alert", SourceTS: "2:30 PM"},
+	t1 := time.Date(2026, 2, 17, 13, 0, 0, 0, time.UTC)
+	items := []SignalRecord{
+		{Title: "#random", Preview: "unread"},
 	}
-	ReconcileSignals(db, "gmail", items1, now)
+	ReconcileSignals(db, "slack", items, t1)
 
-	sigs, _ := ListSignals(db, "gmail", false)
-	CompleteSignal(db, sigs[0].ID)
+	sigs, _ := ListSignals(db, "slack", false)
+	episode1ID := sigs[0].ID
+	CompleteSignal(db, episode1ID)
 
-	ReconcileSignals(db, "gmail", items1, now)
+	// Re-scrape with same channel still unread — should create new episode.
+	t2 := time.Date(2026, 2, 17, 14, 0, 0, 0, time.UTC)
+	ReconcileSignals(db, "slack", items, t2)
 
-	active, _ := ListSignals(db, "gmail", false)
-	for _, s := range active {
-		if s.Title == "Alice" {
-			t.Fatal("manually completed signal should not be reactivated")
+	active, _ := ListSignals(db, "slack", false)
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active (new episode), got %d", len(active))
+	}
+	if active[0].ID == episode1ID {
+		t.Fatal("expected new episode, not reactivation of manually completed one")
+	}
+
+	// Old episode stays completed.
+	all, _ := ListSignals(db, "slack", true)
+	for _, s := range all {
+		if s.ID == episode1ID && s.CompletedAt == nil {
+			t.Fatal("manually completed episode should stay completed")
 		}
 	}
 }
