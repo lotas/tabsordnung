@@ -180,6 +180,13 @@ INSERT INTO signals_new SELECT id, source, title, preview, snippet, source_ts, c
 DROP TABLE signals;
 ALTER TABLE signals_new RENAME TO signals;`,
 	},
+	{
+		Version:     6,
+		Description: "add kind, urgency, urgency_source columns to signals",
+		SQL: `ALTER TABLE signals ADD COLUMN kind TEXT DEFAULT '';
+ALTER TABLE signals ADD COLUMN urgency TEXT;
+ALTER TABLE signals ADD COLUMN urgency_source TEXT;`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.

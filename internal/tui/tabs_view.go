@@ -208,6 +208,7 @@ func (v *TabsView) RebuildTree() {
 	v.tree.SummaryDir = v.summaryDir
 	if v.db != nil {
 		v.tree.SignalCounts, _ = storage.ActiveSignalCounts(v.db)
+		v.tree.SignalUrgency, _ = storage.HighestUrgencyBySource(v.db)
 	}
 
 	if oldExpanded != nil {

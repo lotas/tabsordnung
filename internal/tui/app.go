@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lotas/tabsordnung/internal/analyzer"
+	"github.com/lotas/tabsordnung/internal/classify"
 	"github.com/lotas/tabsordnung/internal/applog"
 	"github.com/lotas/tabsordnung/internal/firefox"
 	"github.com/lotas/tabsordnung/internal/server"
@@ -318,6 +319,53 @@ func signalPollTick() tea.Cmd {
 	})
 }
 
+type classifyTickMsg struct{}
+type classifyDoneMsg struct {
+	id      int64
+	urgency string
+	err     error
+}
+
+const classifyInterval = 30 * time.Second
+
+func classifyTick() tea.Cmd {
+	return tea.Tick(classifyInterval, func(time.Time) tea.Msg {
+		return classifyTickMsg{}
+	})
+}
+
+func runClassifyOne(db *sql.DB, model, host string) tea.Cmd {
+	return func() tea.Msg {
+		sigs, err := storage.ListUnclassifiedSignals(db)
+		if err != nil || len(sigs) == 0 {
+			return classifyDoneMsg{err: err}
+		}
+		sig := sigs[0]
+
+		// Heuristic classification for signals with kind
+		if urgency, ok := storage.ClassifyByKind(sig.Kind); ok {
+			err := storage.UpdateUrgency(db, sig.ID, urgency, "heuristic")
+			return classifyDoneMsg{id: sig.ID, urgency: urgency, err: err}
+		}
+
+		// Slack/Matrix without kind: default to fyi (heuristic only, no LLM)
+		if sig.Source == "slack" || sig.Source == "matrix" {
+			err := storage.UpdateUrgency(db, sig.ID, "fyi", "heuristic")
+			return classifyDoneMsg{id: sig.ID, urgency: "fyi", err: err}
+		}
+
+		// LLM classification for Gmail
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		urgency, err := classify.ClassifySignal(ctx, model, host, sig.Title, sig.Preview, sig.Snippet)
+		if err != nil {
+			return classifyDoneMsg{id: sig.ID, err: err}
+		}
+		err = storage.UpdateUrgency(db, sig.ID, urgency, "llm")
+		return classifyDoneMsg{id: sig.ID, urgency: urgency, err: err}
+	}
+}
+
 func runReconcileSignals(db *sql.DB, source string, items []signal.SignalItem, capturedAt time.Time) tea.Cmd {
 	return func() tea.Msg {
 		applog.Info("signal.reconcile.start", "source", source, "itemCount", len(items), "capturedAt", capturedAt.Format(time.RFC3339))
@@ -327,6 +375,7 @@ func runReconcileSignals(db *sql.DB, source string, items []signal.SignalItem, c
 				Title:    item.Title,
 				Preview:  item.Preview,
 				Snippet:  item.Snippet,
+				Kind:     item.Kind,
 				SourceTS: item.Timestamp,
 			}
 		}
@@ -349,6 +398,13 @@ func completeSignalCmd(db *sql.DB, id int64, source string) tea.Cmd {
 func reopenSignalCmd(db *sql.DB, id int64, source string) tea.Cmd {
 	return func() tea.Msg {
 		err := storage.ReopenSignal(db, id)
+		return signalActionMsg{source: source, err: err}
+	}
+}
+
+func setUrgencyCmd(db *sql.DB, id int64, urgency string, source string) tea.Cmd {
+	return func() tea.Msg {
+		err := storage.UpdateUrgency(db, id, urgency, "manual")
 		return signalActionMsg{source: source, err: err}
 	}
 }
@@ -575,6 +631,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			runDeadLinkChecks(m.session.AllTabs),
 			runGitHubChecks(m.session.AllTabs),
 			snapshotsCmd,
+			classifyTick(),
 		)
 
 	case analysisCompleteMsg:
@@ -627,6 +684,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tabsView.signals, _ = storage.ListSignals(m.db, m.tabsView.signalSource, true)
 		}
 		m.tabsView.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
+		m.tabsView.tree.SignalUrgency, _ = storage.HighestUrgencyBySource(m.db)
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.tabsView.processNextSignal())
 		if m.activeView == ViewSignals {
@@ -648,6 +706,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.tabsView.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
+		m.tabsView.tree.SignalUrgency, _ = storage.HighestUrgencyBySource(m.db)
 		if m.activeView == ViewSignals {
 			v, cmd := m.signalsView.Update(msg)
 			m.signalsView = v
@@ -666,6 +725,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case signalPollTickMsg:
 		return m, m.tabsView.queueSignalPoll()
+
+	case classifyTickMsg:
+		return m, tea.Batch(
+			runClassifyOne(m.db, m.ollamaModel, m.ollamaHost),
+			classifyTick(),
+		)
+
+	case classifyDoneMsg:
+		if msg.err != nil {
+			applog.Error("classify.done", msg.err, "id", msg.id)
+		} else if msg.urgency != "" {
+			applog.Info("classify.done", "id", msg.id, "urgency", msg.urgency)
+		}
+		// Refresh signal counts and urgency
+		m.tabsView.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
+		m.tabsView.tree.SignalUrgency, _ = storage.HighestUrgencyBySource(m.db)
+		if m.activeView == ViewSignals {
+			return m, m.signalsView.Reload()
+		}
+		return m, nil
 
 	case rebuildTickMsg:
 		m.doRebuild()
@@ -693,6 +772,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			runGitHubChecks(m.session.AllTabs),
 			listenWebSocket(m.server),
 			signalPollTick(),
+			classifyTick(),
 		)
 
 	case wsDisconnectedMsg:
@@ -1035,7 +1115,7 @@ func (m Model) View() string {
 	case ViewTabs:
 		bottomText = m.tabsView.BottomBar()
 	case ViewSignals:
-		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 open \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
+		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 open \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 [/] urgency \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
 	case ViewSnapshots:
 		bottomText = "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
 	}

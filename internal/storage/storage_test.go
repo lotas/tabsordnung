@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // testDB creates a temporary database for testing.
@@ -479,5 +482,123 @@ func TestDeleteSnapshot(t *testing.T) {
 	}
 	if tabCount != 0 {
 		t.Errorf("expected 0 orphan tabs, got %d", tabCount)
+	}
+}
+
+func TestListUnclassifiedSignals(t *testing.T) {
+	db := testDB(t)
+
+	// Insert 3 signals: one classified, one unclassified active, one unclassified completed
+	db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at, urgency, urgency_source)
+		VALUES ('gmail', 'Alice', 'hello', 'ts1', CURRENT_TIMESTAMP, 'urgent', 'llm')`)
+	db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at)
+		VALUES ('slack', 'Bob', 'unread', 'ts2', CURRENT_TIMESTAMP)`)
+	db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at, completed_at)
+		VALUES ('gmail', 'Carol', 'bye', 'ts3', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
+
+	sigs, err := ListUnclassifiedSignals(db)
+	if err != nil {
+		t.Fatalf("ListUnclassifiedSignals: %v", err)
+	}
+	if len(sigs) != 1 {
+		t.Fatalf("expected 1 unclassified active signal, got %d", len(sigs))
+	}
+	if sigs[0].Title != "Bob" {
+		t.Errorf("expected Bob, got %q", sigs[0].Title)
+	}
+}
+
+func TestUpdateUrgency(t *testing.T) {
+	db := testDB(t)
+
+	db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at)
+		VALUES ('gmail', 'Alice', 'hello', 'ts1', CURRENT_TIMESTAMP)`)
+
+	var id int64
+	db.QueryRow(`SELECT id FROM signals WHERE title = 'Alice'`).Scan(&id)
+
+	err := UpdateUrgency(db, id, "urgent", "llm")
+	if err != nil {
+		t.Fatalf("UpdateUrgency: %v", err)
+	}
+
+	var urgency, urgencySource sql.NullString
+	db.QueryRow(`SELECT urgency, urgency_source FROM signals WHERE id = ?`, id).
+		Scan(&urgency, &urgencySource)
+	if !urgency.Valid || urgency.String != "urgent" {
+		t.Errorf("expected urgency 'urgent', got %v", urgency)
+	}
+	if !urgencySource.Valid || urgencySource.String != "llm" {
+		t.Errorf("expected urgency_source 'llm', got %v", urgencySource)
+	}
+}
+
+func TestReconcileSignals_HeuristicUrgency(t *testing.T) {
+	db := testDB(t)
+	now := time.Now()
+
+	items := []SignalRecord{
+		{Title: "alice", Preview: "DM · unread", Kind: "dm"},
+		{Title: "#general", Preview: "3 mentioned", Kind: "mention"},
+		{Title: "#random", Preview: "unread", Kind: "channel"},
+		{Title: "Bob", Preview: "Project update", Kind: ""}, // gmail, no kind
+	}
+	err := ReconcileSignals(db, "slack", items[:3], now)
+	if err != nil {
+		t.Fatalf("ReconcileSignals slack: %v", err)
+	}
+	err = ReconcileSignals(db, "gmail", items[3:], now)
+	if err != nil {
+		t.Fatalf("ReconcileSignals gmail: %v", err)
+	}
+
+	sigs, _ := ListSignals(db, "", false)
+
+	urgencies := make(map[string]*string)
+	for _, s := range sigs {
+		urgencies[s.Title] = s.Urgency
+	}
+
+	// DM -> urgent
+	if urgencies["alice"] == nil || *urgencies["alice"] != "urgent" {
+		t.Errorf("expected alice=urgent, got %v", urgencies["alice"])
+	}
+	// mention -> review
+	if urgencies["#general"] == nil || *urgencies["#general"] != "review" {
+		t.Errorf("expected #general=review, got %v", urgencies["#general"])
+	}
+	// channel -> fyi
+	if urgencies["#random"] == nil || *urgencies["#random"] != "fyi" {
+		t.Errorf("expected #random=fyi, got %v", urgencies["#random"])
+	}
+	// gmail with no kind -> nil (unclassified)
+	if urgencies["Bob"] != nil {
+		t.Errorf("expected Bob=nil (unclassified), got %v", *urgencies["Bob"])
+	}
+}
+
+func TestMigration6_UrgencyColumns(t *testing.T) {
+	db := testDB(t)
+
+	_, err := db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at)
+		VALUES ('gmail', 'Alice', 'hello', '2:30 PM', CURRENT_TIMESTAMP)`)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	var kind, urgency, urgencySource sql.NullString
+	err = db.QueryRow(`SELECT kind, urgency, urgency_source FROM signals WHERE title = 'Alice'`).
+		Scan(&kind, &urgency, &urgencySource)
+	if err != nil {
+		t.Fatalf("select new columns: %v", err)
+	}
+	if kind.String != "" {
+		t.Errorf("expected empty kind, got %q", kind.String)
+	}
+	if urgency.Valid {
+		t.Errorf("expected NULL urgency, got %q", urgency.String)
+	}
+	if urgencySource.Valid {
+		t.Errorf("expected NULL urgency_source, got %q", urgencySource.String)
 	}
 }

@@ -12,6 +12,7 @@ type SignalItem struct {
 	Preview   string `json:"preview"`
 	Snippet   string `json:"snippet"`
 	Timestamp string `json:"timestamp"`
+	Kind      string `json:"kind"` // "dm", "mention", "channel", or ""
 }
 
 func DetectSource(url string) string {

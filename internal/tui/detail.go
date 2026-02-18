@@ -152,6 +152,10 @@ func (m *DetailModel) ViewTabWithSignal(tab *types.Tab, signals []storage.Signal
 	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	completedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	cursorStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
+	urgentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	reviewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	fyiStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	unclassifiedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 	if capturing {
 		base += "\n" + activeStyle.Render("Capturing signal...")
@@ -175,26 +179,37 @@ func (m *DetailModel) ViewTabWithSignal(tab *types.Tab, signals []storage.Signal
 				prefix = "> "
 			}
 
+			urgencyPrefix := unclassifiedStyle.Render("[?] ")
+			if s.Urgency != nil {
+				switch *s.Urgency {
+				case "urgent":
+					urgencyPrefix = urgentStyle.Render("[!] ")
+				case "review":
+					urgencyPrefix = reviewStyle.Render("[~] ")
+				case "fyi":
+					urgencyPrefix = fyiStyle.Render("[ ] ")
+				}
+			}
+
 			age := formatSignalAge(s.CapturedAt)
 			suffix := "  " + age
-			line := fmt.Sprintf("[%d] %s", s.ID, s.Title)
+			line := s.Title
 			if s.Preview != "" {
 				line += " — " + s.Preview
 			}
 
 			// Truncate to fit within pane width (1 visual line per signal).
-			maxLen := m.Width - len(prefix) - len(suffix) - 1
+			maxLen := m.Width - len(prefix) - 4 - len(suffix) - 1
 			if maxLen > 0 && len(line) > maxLen {
 				line = line[:maxLen-1] + "…"
 			}
-			line = prefix + line + suffix
 
 			if i == signalCursor {
-				base += cursorStyle.Render(line) + "\n"
+				base += cursorStyle.Render(prefix+urgencyPrefix+line+suffix) + "\n"
 			} else if s.CompletedAt != nil {
-				base += completedStyle.Render(prefix+"✓ "+line[2:]) + "\n"
+				base += completedStyle.Render(prefix+"✓ "+line+suffix) + "\n"
 			} else {
-				base += line + "\n"
+				base += prefix + urgencyPrefix + line + suffix + "\n"
 			}
 		}
 

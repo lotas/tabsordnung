@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/lotas/tabsordnung/internal/analyzer"
 	"github.com/lotas/tabsordnung/internal/applog"
+	"github.com/lotas/tabsordnung/internal/classify"
 	"github.com/lotas/tabsordnung/internal/export"
 	"github.com/lotas/tabsordnung/internal/firefox"
 	"github.com/lotas/tabsordnung/internal/server"
@@ -46,6 +48,9 @@ func main() {
 			return
 		case "signals":
 			runSignals(os.Args[2:])
+			return
+		case "rules":
+			runRules(os.Args[2:])
 			return
 		case "help", "--help", "-h":
 			printHelp()
@@ -160,6 +165,9 @@ Usage:
   tabsordnung signals list [--all] [--json] [--source X] List signals
   tabsordnung signals complete <id>                      Mark signal as completed
   tabsordnung signals reopen <id>                        Reopen a completed signal
+
+  tabsordnung rules view                               Show urgency classification rules
+  tabsordnung rules edit                               Open rules file in $EDITOR
 
   tabsordnung triage                                   Classify GitHub tabs into groups
     --profile <name>       Firefox profile name
@@ -856,4 +864,52 @@ func runSignalsReopen(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Signal %d reopened.\n", id)
+}
+
+func runRules(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: tabsordnung rules view|edit")
+		os.Exit(1)
+	}
+
+	rulesPath := classify.RulesFilePath()
+
+	switch args[0] {
+	case "view":
+		data, err := os.ReadFile(rulesPath)
+		if err != nil {
+			fmt.Println("No rules configured.")
+			fmt.Printf("Rules file: %s\n", rulesPath)
+			return
+		}
+		content := strings.TrimSpace(string(data))
+		if content == "" {
+			fmt.Println("Rules file is empty.")
+		} else {
+			fmt.Println(content)
+		}
+		fmt.Printf("\nRules file: %s\n", rulesPath)
+
+	case "edit":
+		os.MkdirAll(filepath.Dir(rulesPath), 0o755)
+		if _, err := os.Stat(rulesPath); os.IsNotExist(err) {
+			os.WriteFile(rulesPath, []byte(""), 0o644)
+		}
+		editor := os.Getenv("EDITOR")
+		if editor == "" {
+			editor = "vi"
+		}
+		cmd := exec.Command(editor, rulesPath)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running editor: %v\n", err)
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown rules command %q. Use view or edit.\n", args[0])
+		os.Exit(1)
+	}
 }

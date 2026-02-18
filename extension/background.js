@@ -271,12 +271,18 @@ async function handleCommand(msg) {
             return Array.from(channels).slice(0, 20).map(el => {
               const name = el.querySelector(".p-channel_sidebar__name")?.textContent?.trim() || "";
               const badge = el.querySelector('[data-qa="mention_badge"]')?.textContent?.trim() || "";
-              const type = el.getAttribute("data-qa-channel-sidebar-channel-type") === "im" ? "dm" : "channel";
+              const isDM = el.getAttribute("data-qa-channel-sidebar-channel-type") === "im";
+              let kind = "channel";
+              if (isDM) {
+                kind = "dm";
+              } else if (badge) {
+                kind = "mention";
+              }
               const parts = [];
-              if (type === "dm") parts.push("DM");
+              if (isDM) parts.push("DM");
               if (badge) parts.push(`${badge} mentioned`);
               else parts.push("unread");
-              return { title: name, preview: parts.join(" · "), timestamp: "" };
+              return { title: name, preview: parts.join(" · "), timestamp: "", kind };
             });
           },
           matrix: () => {
@@ -290,7 +296,16 @@ async function handleCommand(msg) {
               const badge = room.querySelector(".mx_NotificationBadge_count");
               const count = badge?.textContent?.trim();
               const preview = count ? count + " unread" : "unread";
-              items.push({ title: name, preview, timestamp: "" });
+              const isDM = room.classList.contains("mx_RoomTile_dm") ||
+                           room.querySelector(".mx_DecoratedRoomAvatar_icon_dm") !== null;
+              const hasHighlight = room.querySelector(".mx_NotificationBadge_highlighted") !== null;
+              let kind = "channel";
+              if (isDM) {
+                kind = "dm";
+              } else if (hasHighlight) {
+                kind = "mention";
+              }
+              items.push({ title: name, preview, timestamp: "", kind });
             });
             return items;
           },

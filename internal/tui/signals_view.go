@@ -17,11 +17,12 @@ type signalsViewLoadedMsg struct {
 
 // signalNode represents a row in the signals tree.
 type signalNode struct {
-	IsHeader    bool   // true for source/section headers
-	Header      string // e.g. "Gmail (3 active)" or "Completed (5)"
-	Signal      *storage.SignalRecord
-	Source      string // source name (set on headers and their children)
-	IsCompleted bool   // true for the "Completed" section header
+	IsHeader       bool   // true for source/section headers
+	Header         string // e.g. "Gmail (3 active)" or "Completed (5)"
+	Signal         *storage.SignalRecord
+	Source         string  // source name (set on headers and their children)
+	IsCompleted    bool    // true for the "Completed" section header
+	HighestUrgency *string // for headers: most urgent signal in this source
 }
 
 type SignalsView struct {
@@ -67,6 +68,31 @@ func (v *SignalsView) SetSize(w, h int) {
 	v.detail.Height = h
 }
 
+func highestUrgency(signals []*storage.SignalRecord) *string {
+	var highest *string
+	rank := func(u *string) int {
+		if u == nil {
+			return 0
+		}
+		switch *u {
+		case "urgent":
+			return 3
+		case "review":
+			return 2
+		case "fyi":
+			return 1
+		default:
+			return 0
+		}
+	}
+	for _, s := range signals {
+		if rank(s.Urgency) > rank(highest) {
+			highest = s.Urgency
+		}
+	}
+	return highest
+}
+
 func (v *SignalsView) buildNodes() {
 	v.nodes = nil
 
@@ -102,10 +128,12 @@ func (v *SignalsView) buildNodes() {
 		if v.sourceExpanded[src] {
 			icon = "▼"
 		}
+		highest := highestUrgency(sg.signals)
 		v.nodes = append(v.nodes, signalNode{
-			IsHeader: true,
-			Header:   fmt.Sprintf("%s %s (%d active)", icon, sg.source, len(sg.signals)),
-			Source:   src,
+			IsHeader:       true,
+			Header:         fmt.Sprintf("%s %s (%d active)", icon, sg.source, len(sg.signals)),
+			Source:          src,
+			HighestUrgency: highest,
 		})
 		if v.sourceExpanded[src] {
 			for _, s := range sg.signals {
@@ -247,6 +275,18 @@ func (v SignalsView) Update(msg tea.Msg) (SignalsView, tea.Cmd) {
 			if sig != nil && sig.CompletedAt != nil {
 				return v, reopenSignalCmd(v.db, sig.ID, sig.Source)
 			}
+		case "]":
+			sig := v.selectedSignal()
+			if sig != nil && sig.CompletedAt == nil {
+				next := cycleUrgencyUp(sig.Urgency)
+				return v, setUrgencyCmd(v.db, sig.ID, next, sig.Source)
+			}
+		case "[":
+			sig := v.selectedSignal()
+			if sig != nil && sig.CompletedAt == nil {
+				next := cycleUrgencyDown(sig.Urgency)
+				return v, setUrgencyCmd(v.db, sig.ID, next, sig.Source)
+			}
 		}
 	}
 	return v, nil
@@ -295,6 +335,10 @@ func (v SignalsView) ViewList() string {
 	cursorStyle := lipgloss.NewStyle().Bold(true).Reverse(true)
 	groupStyle := lipgloss.NewStyle().Bold(true)
 	completedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	urgentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	reviewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	fyiStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	unclassifiedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 	var b strings.Builder
 	end := v.offset + v.height
@@ -307,11 +351,33 @@ func (v SignalsView) ViewList() string {
 		var line string
 
 		if node.IsHeader {
-			line = groupStyle.Render(node.Header)
+			style := groupStyle
+			if node.HighestUrgency != nil {
+				switch *node.HighestUrgency {
+				case "urgent":
+					style = style.Foreground(lipgloss.Color("196"))
+				case "review":
+					style = style.Foreground(lipgloss.Color("214"))
+				}
+			}
+			line = style.Render(node.Header)
 		} else if node.Signal != nil {
 			s := node.Signal
 			age := formatSignalAge(s.CapturedAt)
-			text := fmt.Sprintf("    %s", s.Title)
+
+			urgencyPrefix := unclassifiedStyle.Render("[?] ")
+			if s.Urgency != nil {
+				switch *s.Urgency {
+				case "urgent":
+					urgencyPrefix = urgentStyle.Render("[!] ")
+				case "review":
+					urgencyPrefix = reviewStyle.Render("[~] ")
+				case "fyi":
+					urgencyPrefix = fyiStyle.Render("[ ] ")
+				}
+			}
+
+			text := fmt.Sprintf("  %s%s", urgencyPrefix, s.Title)
 			if s.Preview != "" {
 				text += " — " + s.Preview
 			}
@@ -324,7 +390,7 @@ func (v SignalsView) ViewList() string {
 			line = text + suffix
 
 			if s.CompletedAt != nil {
-				line = completedStyle.Render("  ✓ " + line[4:])
+				line = completedStyle.Render("  ✓ " + line[2:])
 			}
 		}
 
@@ -384,6 +450,29 @@ func (v SignalsView) ViewDetail() string {
 	b.WriteString(labelStyle.Render("Captured") + "\n")
 	b.WriteString(valueStyle.Render(sig.CapturedAt.Local().Format("2006-01-02 15:04") + " (" + formatSignalAge(sig.CapturedAt) + ")") + "\n\n")
 
+	b.WriteString(labelStyle.Render("Urgency") + "\n")
+	if sig.Urgency != nil {
+		urgencyVal := *sig.Urgency
+		src := ""
+		if sig.UrgencySource != nil {
+			src = " (" + *sig.UrgencySource + ")"
+		}
+		var uStyle lipgloss.Style
+		switch urgencyVal {
+		case "urgent":
+			uStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+		case "review":
+			uStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+		case "fyi":
+			uStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		default:
+			uStyle = valueStyle
+		}
+		b.WriteString(uStyle.Render(urgencyVal+src) + "\n\n")
+	} else {
+		b.WriteString(valueStyle.Render("pending") + "\n\n")
+	}
+
 	b.WriteString(labelStyle.Render("Status") + "\n")
 	if sig.CompletedAt != nil {
 		b.WriteString(completedStyle.Render("Completed") + "\n")
@@ -399,3 +488,33 @@ func (v SignalsView) ViewDetail() string {
 }
 
 func (v SignalsView) FocusDetail() bool { return v.focusDetail }
+
+// cycleUrgencyUp raises urgency: nil→fyi→review→urgent→fyi (wraps).
+func cycleUrgencyUp(current *string) string {
+	if current == nil {
+		return "fyi"
+	}
+	switch *current {
+	case "fyi":
+		return "review"
+	case "review":
+		return "urgent"
+	default:
+		return "fyi"
+	}
+}
+
+// cycleUrgencyDown lowers urgency: nil→urgent→review→fyi→urgent (wraps).
+func cycleUrgencyDown(current *string) string {
+	if current == nil {
+		return "urgent"
+	}
+	switch *current {
+	case "urgent":
+		return "review"
+	case "review":
+		return "fyi"
+	default:
+		return "urgent"
+	}
+}

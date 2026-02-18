@@ -25,7 +25,8 @@ type TreeModel struct {
 	Selected         map[int]bool    // BrowserID -> selected
 	SummarizingURLs  map[string]bool // URL -> actively summarizing
 	SummaryDir       string          // path to summaries directory
-	SignalCounts     map[string]int  // source -> active signal count
+	SignalCounts     map[string]int    // source -> active signal count
+	SignalUrgency    map[string]string // source -> highest urgency
 	Cursor           int
 	Offset           int // scroll offset
 	Width            int
@@ -301,7 +302,18 @@ func (m TreeModel) View() string {
 			}
 			if src := signal.DetectSource(node.Tab.URL); src != "" {
 				if n := m.SignalCounts[src]; n > 0 {
-					markers = append(markers, signalStyle.Render(fmt.Sprintf("⚡%d", n)))
+					style := signalStyle
+					if u, ok := m.SignalUrgency[src]; ok {
+						switch u {
+						case "urgent":
+							style = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+						case "review":
+							style = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+						case "fyi":
+							style = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+						}
+					}
+					markers = append(markers, style.Render(fmt.Sprintf("⚡%d", n)))
 				}
 			}
 
