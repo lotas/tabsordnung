@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/lotas/tabsordnung/internal/applog"
 )
 
 // SignalRecord represents a single signal item stored in the database.
@@ -144,24 +146,27 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 
 	// 1. Query active signals for this source.
 	rows, err := tx.Query(
-		`SELECT id, title FROM signals WHERE source = ? AND completed_at IS NULL`, source)
+		`SELECT id, title, preview FROM signals WHERE source = ? AND completed_at IS NULL`, source)
 	if err != nil {
 		return err
 	}
-	activeTitles := make(map[string]bool)
+	activeKeys := make(map[string]bool) // key = title + "\n" + preview
+	var activeDescList []string
 	for rows.Next() {
 		var id int64
-		var title string
-		if err := rows.Scan(&id, &title); err != nil {
+		var title, preview string
+		if err := rows.Scan(&id, &title, &preview); err != nil {
 			rows.Close()
 			return err
 		}
-		activeTitles[title] = true
+		activeKeys[title+"\n"+preview] = true
+		activeDescList = append(activeDescList, title+" | "+preview)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	applog.Info("signal.reconcile.active", "source", source, "activeCount", len(activeDescList), "signals", strings.Join(activeDescList, "; "))
 
 	// 2. Insert new episodes for items without an active signal.
 	tsStr := capturedAt.Format(time.RFC3339)
@@ -173,10 +178,13 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 	}
 	defer insertStmt.Close()
 
-	scrapedTitles := make(map[string]bool)
+	scrapedKeys := make(map[string]bool)
+	inserted := 0
 	for _, item := range items {
-		scrapedTitles[item.Title] = true
-		if activeTitles[item.Title] {
+		key := item.Title + "\n" + item.Preview
+		scrapedKeys[key] = true
+		if activeKeys[key] {
+			applog.Info("signal.reconcile.insert", "source", source, "title", item.Title, "preview", item.Preview, "action", "skip-active")
 			continue // episode still running
 		}
 		sourceTS := item.SourceTS
@@ -186,28 +194,36 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 		if _, err := insertStmt.Exec(source, item.Title, item.Preview, item.Snippet, sourceTS, capturedAt); err != nil {
 			return err
 		}
+		applog.Info("signal.reconcile.insert", "source", source, "title", item.Title, "preview", item.Preview, "action", "new", "sourceTS", sourceTS)
+		inserted++
 	}
 
 	// 3. Auto-complete active signals not in current scrape (unless pinned).
-	_, err = tx.Exec(`
+	scrapedJSON := keysToJSON(scrapedKeys)
+	res, err := tx.Exec(`
 		UPDATE signals
 		SET completed_at = CURRENT_TIMESTAMP, auto_completed = 1
 		WHERE source = ? AND completed_at IS NULL AND pinned = 0
-		  AND title NOT IN (SELECT value FROM json_each(?))`,
-		source, titlesToJSON(scrapedTitles))
+		  AND (title || char(10) || preview) NOT IN (SELECT value FROM json_each(?))`,
+		source, scrapedJSON)
 	if err != nil {
 		return err
 	}
+	autoCompleted, _ := res.RowsAffected()
+	applog.Info("signal.reconcile.autoComplete", "source", source, "completedCount", autoCompleted, "scrapedKeysJSON", scrapedJSON)
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	applog.Info("signal.reconcile.done", "source", source, "inserted", inserted, "autoCompleted", autoCompleted)
+	return nil
 }
 
-// titlesToJSON converts a title set to a JSON array string for use with json_each().
-func titlesToJSON(titles map[string]bool) string {
-	parts := make([]string, 0, len(titles))
-	for t := range titles {
-		// Escape quotes in titles for JSON safety.
-		escaped := strings.ReplaceAll(t, `\`, `\\`)
+// keysToJSON converts a key set to a JSON array string for use with json_each().
+func keysToJSON(keys map[string]bool) string {
+	parts := make([]string, 0, len(keys))
+	for k := range keys {
+		escaped := strings.ReplaceAll(k, `\`, `\\`)
 		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 		parts = append(parts, `"`+escaped+`"`)
 	}

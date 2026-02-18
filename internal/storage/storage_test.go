@@ -34,12 +34,21 @@ func TestSignalsTableExists(t *testing.T) {
 		t.Fatalf("insert into signals: %v", err)
 	}
 
+	// Same source+title+preview+source_ts → unique violation
 	_, err = db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at)
-		VALUES ('gmail', 'Alice', 'different preview', '2:30 PM', CURRENT_TIMESTAMP)`)
+		VALUES ('gmail', 'Alice', 'hello', '2:30 PM', CURRENT_TIMESTAMP)`)
 	if err == nil {
 		t.Fatal("expected unique constraint violation")
 	}
 
+	// Different preview → allowed (distinct email subject)
+	_, err = db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at)
+		VALUES ('gmail', 'Alice', 'different preview', '2:30 PM', CURRENT_TIMESTAMP)`)
+	if err != nil {
+		t.Fatalf("insert with different preview: %v", err)
+	}
+
+	// Different source_ts → allowed (distinct episode)
 	_, err = db.Exec(`INSERT INTO signals (source, title, preview, source_ts, captured_at)
 		VALUES ('gmail', 'Alice', 'hello', '3:00 PM', CURRENT_TIMESTAMP)`)
 	if err != nil {

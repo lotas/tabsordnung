@@ -320,6 +320,7 @@ func signalPollTick() tea.Cmd {
 
 func runReconcileSignals(db *sql.DB, source string, items []signal.SignalItem, capturedAt time.Time) tea.Cmd {
 	return func() tea.Msg {
+		applog.Info("signal.reconcile.start", "source", source, "itemCount", len(items), "capturedAt", capturedAt.Format(time.RFC3339))
 		records := make([]storage.SignalRecord, len(items))
 		for i, item := range items {
 			records[i] = storage.SignalRecord{
@@ -331,6 +332,7 @@ func runReconcileSignals(db *sql.DB, source string, items []signal.SignalItem, c
 		}
 		err := storage.ReconcileSignals(db, source, records, capturedAt)
 		if err != nil {
+			applog.Error("signal.reconcile.error", err, "source", source)
 			return signalCompleteMsg{source: source, err: err}
 		}
 		return signalCompleteMsg{source: source}
@@ -625,7 +627,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tabsView.signals, _ = storage.ListSignals(m.db, m.tabsView.signalSource, true)
 		}
 		m.tabsView.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
-		return m, m.tabsView.processNextSignal()
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.tabsView.processNextSignal())
+		if m.activeView == ViewSignals {
+			cmds = append(cmds, m.signalsView.Reload())
+		}
+		return m, tea.Batch(cmds...)
 
 	case signalActionMsg:
 		if msg.err != nil {
@@ -775,15 +782,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tabsView.signalActive != nil && m.tabsView.signalActive.ContentID == msg.id {
 			source := m.tabsView.signalActive.Source
 			m.tabsView.signalActive = nil
+			applog.Info("signal.extResponse", "source", source, "ok", msg.ok, "error", msg.error, "rawLen", len(msg.items))
+			applog.Info("signal.extItems", "source", source, "raw", msg.items)
 			if !msg.ok {
+				applog.Error("signal.extResponse.fail", fmt.Errorf("%s", msg.error), "source", source)
 				m.tabsView.signalErrors[source] = msg.error
 				return m, tea.Batch(listenWebSocket(m.server), m.tabsView.processNextSignal())
 			}
 			items, err := signal.ParseItemsJSON(msg.items)
 			if err != nil {
+				applog.Error("signal.parsed.fail", err, "source", source)
 				m.tabsView.signalErrors[source] = err.Error()
 				return m, tea.Batch(listenWebSocket(m.server), m.tabsView.processNextSignal())
 			}
+			applog.Info("signal.parsed", "source", source, "count", len(items))
 			return m, tea.Batch(
 				listenWebSocket(m.server),
 				runReconcileSignals(m.db, source, items, time.Now()),

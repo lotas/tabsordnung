@@ -159,6 +159,27 @@ CREATE TABLE signals (
 		Description: "add snippet column to signals",
 		SQL:         `ALTER TABLE signals ADD COLUMN snippet TEXT DEFAULT '';`,
 	},
+	{
+		Version:     5,
+		Description: "widen signals unique constraint to include preview",
+		SQL: `
+CREATE TABLE signals_new (
+    id              INTEGER PRIMARY KEY,
+    source          TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    preview         TEXT DEFAULT '',
+    snippet         TEXT DEFAULT '',
+    source_ts       TEXT NOT NULL DEFAULT '',
+    captured_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at    DATETIME,
+    auto_completed  BOOLEAN DEFAULT 0,
+    pinned          BOOLEAN DEFAULT 0,
+    UNIQUE(source, title, preview, source_ts)
+);
+INSERT INTO signals_new SELECT id, source, title, preview, snippet, source_ts, captured_at, completed_at, auto_completed, pinned FROM signals;
+DROP TABLE signals;
+ALTER TABLE signals_new RENAME TO signals;`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.

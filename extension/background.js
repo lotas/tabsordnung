@@ -204,7 +204,7 @@ async function handleCommand(msg) {
           gmail: (title) => {
             const rows = document.querySelectorAll("tr.zA, tr.zE");
             for (const row of rows) {
-              const senderEl = row.querySelector(".yX.yW span[name]") || row.querySelector(".yX.yW");
+              const senderEl = row.querySelector(".zF") || row.querySelector(".yW");
               const sender = senderEl?.getAttribute?.("name") || senderEl?.textContent?.trim() || "";
               if (sender === title) {
                 row.click();
@@ -259,7 +259,7 @@ async function handleCommand(msg) {
           gmail: () => {
             const rows = document.querySelectorAll("tr.zE");
             return Array.from(rows).slice(0, 20).map(row => {
-              const sender = row.querySelector(".yX.yW span")?.getAttribute("name") || row.querySelector(".yX.yW")?.textContent?.trim() || "";
+              const sender = row.querySelector(".zF")?.getAttribute("name") || row.querySelector(".yW")?.textContent?.trim() || "";
               const subject = row.querySelector(".bog span")?.textContent?.trim() || row.querySelector(".y6 span")?.textContent?.trim() || "";
               const snippet = row.querySelector(".xT .y2")?.textContent?.trim() || row.querySelector(".y2")?.textContent?.trim() || "";
               const timestamp = row.querySelector("td.xW span")?.getAttribute("title") || row.querySelector("td.xW span")?.textContent?.trim() || "";

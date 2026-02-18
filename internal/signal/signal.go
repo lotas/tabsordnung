@@ -3,6 +3,8 @@ package signal
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/lotas/tabsordnung/internal/applog"
 )
 
 type SignalItem struct {
@@ -44,6 +46,9 @@ func deduplicateItems(items []SignalItem) []SignalItem {
 			seen[key] = true
 			result = append(result, item)
 		}
+	}
+	if len(result) != len(items) {
+		applog.Info("signal.dedup", "before", len(items), "after", len(result))
 	}
 	return result
 }
