@@ -51,3 +51,33 @@ func TestRulesFilePath(t *testing.T) {
 		t.Fatal("expected non-empty path")
 	}
 }
+
+func TestClassifyGmailHeuristic(t *testing.T) {
+	tests := []struct {
+		name    string
+		title   string
+		preview string
+		snippet string
+		want    string
+		ok      bool
+	}{
+		{"bot sender", "renovate[bot]", "Update dependency", "", "fyi", true},
+		{"noreply sender", "noreply-spamdigest via group", "Spam report", "", "fyi", true},
+		{"digest sender", "dev-platform Digest", "Topic summary", "", "fyi", true},
+		{"notification sender", "taskcluster-notifications", "Abridged summary", "", "fyi", true},
+		{"snyk sender", "Snyk via taskcluster", "Vulnerability alert", "", "fyi", true},
+		{"resolved bug", "bugzilla-daemon", "Bug status", "Status NEW RESOLVED Comment", "fyi", true},
+		{"fixed bug", "bugzilla-daemon", "Bug update", "Resolution --- FIXED Status", "fyi", true},
+		{"human PR comment", "Matt", "feat(generic-worker): support capacity", "", "", false},
+		{"human review", "Johan Lorenzo", "Urls pointing to indexes", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ClassifyGmailHeuristic(tt.title, tt.preview, tt.snippet)
+			if ok != tt.ok || got != tt.want {
+				t.Errorf("ClassifyGmailHeuristic(%q, %q, %q) = %q, %v; want %q, %v",
+					tt.title, tt.preview, tt.snippet, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}

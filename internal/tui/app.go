@@ -354,6 +354,12 @@ func runClassifyOne(db *sql.DB, model, host string) tea.Cmd {
 			return classifyDoneMsg{id: sig.ID, urgency: "fyi", err: err}
 		}
 
+		// Gmail sender/content heuristics (skip LLM for bots, digests, resolved bugs)
+		if urgency, ok := classify.ClassifyGmailHeuristic(sig.Title, sig.Preview, sig.Snippet); ok {
+			err := storage.UpdateUrgency(db, sig.ID, urgency, "heuristic")
+			return classifyDoneMsg{id: sig.ID, urgency: urgency, err: err}
+		}
+
 		// LLM classification for Gmail
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

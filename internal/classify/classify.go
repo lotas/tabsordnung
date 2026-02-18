@@ -13,15 +13,46 @@ import (
 
 const promptTemplate = `Classify this email's urgency as exactly one of: urgent, review, fyi
 
-- urgent: requires immediate action, production incidents, time-sensitive requests
-- review: needs attention but can wait for next availability window
-- fyi: informational, can be ignored for days
+- urgent: production incidents, security breaches, direct requests marked as time-sensitive
+- review: a human is commenting on your code, requesting your review, discussing a bug, or asking you something directly
+- fyi: marketing emails, wellness newsletters, mailing list posts, announcements, anything not expecting your personal response
+
+Default to fyi unless there is a clear reason to escalate.
 
 Sender: %s
 Subject: %s
 Snippet: %s
 %s
 Respond with ONLY one word: urgent, review, fyi`
+
+// senderHeuristicPatterns are case-insensitive substrings in the sender name
+// that indicate automated/bulk email → fyi without LLM.
+var senderHeuristicPatterns = []string{
+	"[bot]",
+	"dependa",
+	"renovate",
+	"noreply",
+	"digest",
+	"notification",
+	"snyk",
+}
+
+// ClassifyGmailHeuristic returns "fyi" for automated/bulk Gmail signals
+// based on sender name patterns and content keywords, skipping the LLM.
+func ClassifyGmailHeuristic(title, preview, snippet string) (string, bool) {
+	lower := strings.ToLower(title)
+	for _, pat := range senderHeuristicPatterns {
+		if strings.Contains(lower, pat) {
+			return "fyi", true
+		}
+	}
+	// Bug tracker status changes already resolved
+	combined := preview + " " + snippet
+	if strings.Contains(combined, "RESOLVED") || strings.Contains(combined, "FIXED") {
+		return "fyi", true
+	}
+	return "", false
+}
 
 // BuildPrompt constructs the classification prompt from signal fields and optional rules.
 func BuildPrompt(title, preview, snippet, rules string) string {
