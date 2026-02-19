@@ -17,3 +17,7 @@ run-live: build
 
 clean:
 	rm -f $(BINARY)
+
+install:
+	ln -sf $(PWD)/$(BINARY) ~/.local/bin/$(BINARY) 
+
