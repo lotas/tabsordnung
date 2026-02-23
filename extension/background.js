@@ -258,7 +258,7 @@ async function handleCommand(msg) {
         const scrapers = {
           gmail: () => {
             const rows = document.querySelectorAll("tr.zE");
-            return Array.from(rows).slice(0, 20).map(row => {
+            return Array.from(rows).map(row => {
               const sender = row.querySelector(".zF")?.getAttribute("name") || row.querySelector(".yW")?.textContent?.trim() || "";
               const subject = row.querySelector(".bog span")?.textContent?.trim() || row.querySelector(".y6 span")?.textContent?.trim() || "";
               const snippet = row.querySelector(".xT .y2")?.textContent?.trim() || row.querySelector(".y2")?.textContent?.trim() || "";
@@ -268,7 +268,7 @@ async function handleCommand(msg) {
           },
           slack: () => {
             const channels = document.querySelectorAll(".p-channel_sidebar__channel--unread");
-            return Array.from(channels).slice(0, 20).map(el => {
+            return Array.from(channels).map(el => {
               const name = el.querySelector(".p-channel_sidebar__name")?.textContent?.trim() || "";
               const badge = el.querySelector('[data-qa="mention_badge"]')?.textContent?.trim() || "";
               const isDM = el.getAttribute("data-qa-channel-sidebar-channel-type") === "im";
