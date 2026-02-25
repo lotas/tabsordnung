@@ -49,6 +49,9 @@ func main() {
 		case "signals":
 			runSignals(os.Args[2:])
 			return
+		case "github":
+			runGitHub(os.Args[2:])
+			return
 		case "rules":
 			runRules(os.Args[2:])
 			return
@@ -165,6 +168,9 @@ Usage:
   tabsordnung signals list [--all] [--json] [--source X] List signals
   tabsordnung signals complete <id>                      Mark signal as completed
   tabsordnung signals reopen <id>                        Reopen a completed signal
+
+  tabsordnung github                                     List open GitHub entities
+  tabsordnung github list [--all] [--json] [--state X] [--kind X] [--repo owner/repo]  List tracked GitHub entities
 
   tabsordnung rules view                               Show urgency classification rules
   tabsordnung rules edit                               Open rules file in $EDITOR
@@ -864,6 +870,94 @@ func runSignalsReopen(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Signal %d reopened.\n", id)
+}
+
+func runGitHub(args []string) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		runGitHubList(args)
+		return
+	}
+
+	subcmd := args[0]
+	subArgs := args[1:]
+
+	switch subcmd {
+	case "list":
+		runGitHubList(subArgs)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown github command %q. Use list.\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func runGitHubList(args []string) {
+	fs := flag.NewFlagSet("github list", flag.ExitOnError)
+	jsonFlag := fs.Bool("json", false, "Output as JSON")
+	showAll := fs.Bool("all", false, "Include closed and merged entities")
+	state := fs.String("state", "", "Filter by state (open, closed, merged)")
+	kind := fs.String("kind", "", "Filter by kind (pull, issue)")
+	repo := fs.String("repo", "", "Filter by repo (owner/repo)")
+	fs.Parse(args)
+
+	if *state != "" && *state != "open" && *state != "closed" && *state != "merged" {
+		fmt.Fprintf(os.Stderr, "Invalid --state %q. Use open, closed, or merged.\n", *state)
+		os.Exit(1)
+	}
+	if *kind != "" && *kind != "pull" && *kind != "issue" {
+		fmt.Fprintf(os.Stderr, "Invalid --kind %q. Use pull or issue.\n", *kind)
+		os.Exit(1)
+	}
+	if *repo != "" && !strings.Contains(*repo, "/") {
+		fmt.Fprintf(os.Stderr, "Invalid --repo %q. Expected owner/repo.\n", *repo)
+		os.Exit(1)
+	}
+
+	filterState := "open"
+	if *showAll {
+		filterState = ""
+	}
+	if *state != "" {
+		filterState = *state
+	}
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	entities, err := storage.ListGitHubEntities(db, storage.GitHubFilter{
+		State: filterState,
+		Kind:  *kind,
+		Repo:  *repo,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing github entities: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonFlag {
+		out, err := storage.FormatGitHubJSON(entities)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(out)
+		return
+	}
+
+	events := make(map[int64][]storage.GitHubEntityEvent, len(entities))
+	for _, entity := range entities {
+		ev, err := storage.ListGitHubEntityEvents(db, entity.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing github events for entity %d: %v\n", entity.ID, err)
+			os.Exit(1)
+		}
+		events[entity.ID] = ev
+	}
+
+	fmt.Print(storage.FormatGitHubMarkdown(entities, events))
 }
 
 func runRules(args []string) {

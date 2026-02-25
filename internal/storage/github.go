@@ -2,8 +2,10 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -258,7 +260,7 @@ func UpdateGitHubEntityStatus(db *sql.DB, id int64, update GitHubStatusUpdate) e
 	return nil
 }
 
-// OpenGitHubEntityCount returns the number of entities where state is 'open' or ''.
+// OpenGitHubEntityCount returns the number of entities treated as open.
 func OpenGitHubEntityCount(db *sql.DB) (int, error) {
 	var count int
 	err := db.QueryRow(
@@ -268,6 +270,188 @@ func OpenGitHubEntityCount(db *sql.DB) (int, error) {
 		return 0, fmt.Errorf("count open github entities: %w", err)
 	}
 	return count, nil
+}
+
+// GitHubJSONOutput is the structure for `tabsordnung github --json` output.
+type GitHubJSONOutput struct {
+	Owner           string `json:"owner"`
+	Repo            string `json:"repo"`
+	Number          int    `json:"number"`
+	Kind            string `json:"kind"`
+	URL             string `json:"url"`
+	Title           string `json:"title"`
+	State           string `json:"state"`
+	Author          string `json:"author"`
+	Assignees       string `json:"assignees"`
+	ReviewStatus    string `json:"review_status"`
+	ChecksStatus    string `json:"checks_status"`
+	FirstSeenAt     string `json:"first_seen_at"`
+	FirstSeenSource string `json:"first_seen_source"`
+	LastRefreshedAt string `json:"last_refreshed_at"`
+	GHUpdatedAt     string `json:"gh_updated_at"`
+}
+
+// FormatGitHubMarkdown formats entities grouped by state as markdown.
+func FormatGitHubMarkdown(entities []GitHubEntity, events map[int64][]GitHubEntityEvent) string {
+	if len(entities) == 0 {
+		return "No GitHub entities found.\n"
+	}
+
+	stateTitle := func(state string) string {
+		switch state {
+		case "open", "":
+			return "Open"
+		case "merged":
+			return "Merged"
+		case "closed":
+			return "Closed"
+		default:
+			return capitalize(state)
+		}
+	}
+	stateBucket := func(state string) string {
+		if state == "" {
+			return "open"
+		}
+		return state
+	}
+	stateOrder := map[string]int{
+		"open":   0,
+		"merged": 1,
+		"closed": 2,
+	}
+
+	grouped := make(map[string][]GitHubEntity)
+	for _, e := range entities {
+		grouped[stateBucket(e.State)] = append(grouped[stateBucket(e.State)], e)
+	}
+
+	states := make([]string, 0, len(grouped))
+	for s := range grouped {
+		states = append(states, s)
+	}
+	sort.Slice(states, func(i, j int) bool {
+		oi, okI := stateOrder[states[i]]
+		oj, okJ := stateOrder[states[j]]
+		if !okI {
+			oi = 100
+		}
+		if !okJ {
+			oj = 100
+		}
+		if oi != oj {
+			return oi < oj
+		}
+		return states[i] < states[j]
+	})
+
+	var b strings.Builder
+	for _, state := range states {
+		items := grouped[state]
+		fmt.Fprintf(&b, "## %s (%d)\n\n", stateTitle(state), len(items))
+		for _, e := range items {
+			title := strings.TrimSpace(e.Title)
+			if title == "" {
+				title = "(untitled)"
+			}
+			fmt.Fprintf(&b, "- %s/%s#%d [%s] %s\n", e.Owner, e.Repo, e.Number, e.Kind, title)
+
+			var details []string
+			if e.Author != "" {
+				details = append(details, "Author: "+e.Author)
+			}
+			if e.ReviewStatus != nil && *e.ReviewStatus != "" {
+				details = append(details, "Review: "+*e.ReviewStatus)
+			}
+			if e.ChecksStatus != nil && *e.ChecksStatus != "" {
+				details = append(details, "Checks: "+*e.ChecksStatus)
+			}
+			if len(details) > 0 {
+				fmt.Fprintf(&b, "  %s\n", strings.Join(details, " | "))
+			}
+
+			firstSource := firstSeenSource(e, events)
+			lastUpdated := e.FirstSeenAt
+			if e.GHUpdatedAt != nil {
+				lastUpdated = *e.GHUpdatedAt
+			} else if e.LastRefreshedAt != nil {
+				lastUpdated = *e.LastRefreshedAt
+			}
+			fmt.Fprintf(
+				&b,
+				"  First seen: %s (%s) | Last updated: %s\n\n",
+				e.FirstSeenAt.Format("2006-01-02"),
+				firstSource,
+				formatAge(lastUpdated),
+			)
+		}
+	}
+
+	return b.String()
+}
+
+func firstSeenSource(e GitHubEntity, events map[int64][]GitHubEntityEvent) string {
+	if e.FirstSeenSource != "" {
+		return e.FirstSeenSource
+	}
+	entityEvents, ok := events[e.ID]
+	if !ok || len(entityEvents) == 0 {
+		return "unknown"
+	}
+	switch entityEvents[0].EventType {
+	case "tab_seen":
+		return "tab"
+	case "signal_seen":
+		return "signal"
+	default:
+		return "unknown"
+	}
+}
+
+// FormatGitHubJSON formats entities as a flat JSON array.
+func FormatGitHubJSON(entities []GitHubEntity) (string, error) {
+	out := make([]GitHubJSONOutput, 0, len(entities))
+	for _, e := range entities {
+		item := GitHubJSONOutput{
+			Owner:           e.Owner,
+			Repo:            e.Repo,
+			Number:          e.Number,
+			Kind:            e.Kind,
+			URL:             fmt.Sprintf("https://github.com/%s/%s/%s/%d", e.Owner, e.Repo, entityURLPath(e.Kind), e.Number),
+			Title:           e.Title,
+			State:           e.State,
+			Author:          e.Author,
+			Assignees:       e.Assignees,
+			FirstSeenAt:     e.FirstSeenAt.Format(time.RFC3339),
+			FirstSeenSource: e.FirstSeenSource,
+		}
+		if e.ReviewStatus != nil {
+			item.ReviewStatus = *e.ReviewStatus
+		}
+		if e.ChecksStatus != nil {
+			item.ChecksStatus = *e.ChecksStatus
+		}
+		if e.LastRefreshedAt != nil {
+			item.LastRefreshedAt = e.LastRefreshedAt.Format(time.RFC3339)
+		}
+		if e.GHUpdatedAt != nil {
+			item.GHUpdatedAt = e.GHUpdatedAt.Format(time.RFC3339)
+		}
+		out = append(out, item)
+	}
+
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(data) + "\n", nil
+}
+
+func entityURLPath(kind string) string {
+	if kind == "issue" {
+		return "issues"
+	}
+	return "pull"
 }
 
 // ghRef holds the parsed components of a GitHub issue/PR URL.

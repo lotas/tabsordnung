@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -499,4 +501,142 @@ func TestBackfillGitHubEntities(t *testing.T) {
 	if count2 != 3 {
 		t.Fatalf("expected 3 entities on second run, got %d", count2)
 	}
+}
+
+func TestFormatGitHubMarkdown(t *testing.T) {
+	now := time.Now().UTC()
+	review := "approved"
+	checks := "passing"
+	entities := []GitHubEntity{
+		{
+			ID:              1,
+			Owner:           "mozilla",
+			Repo:            "gecko-dev",
+			Number:          1234,
+			Kind:            "pull",
+			Title:           "Fix login redirect loop",
+			State:           "open",
+			Author:          "user1",
+			ReviewStatus:    &review,
+			ChecksStatus:    &checks,
+			FirstSeenAt:     now.Add(-72 * time.Hour),
+			FirstSeenSource: "tab",
+			GHUpdatedAt:     ptrTime(now.Add(-48 * time.Hour)),
+		},
+		{
+			ID:              2,
+			Owner:           "owner",
+			Repo:            "repo",
+			Number:          42,
+			Kind:            "pull",
+			Title:           "Add GitHub tracking",
+			State:           "merged",
+			Author:          "user2",
+			FirstSeenAt:     now.Add(-24 * time.Hour),
+			FirstSeenSource: "signal",
+		},
+		{
+			ID:          3,
+			Owner:       "owner",
+			Repo:        "repo",
+			Number:      7,
+			Kind:        "issue",
+			Title:       "Closed issue",
+			State:       "closed",
+			FirstSeenAt: now.Add(-12 * time.Hour),
+		},
+	}
+	events := map[int64][]GitHubEntityEvent{
+		3: {
+			{EventType: "signal_seen"},
+		},
+	}
+
+	out := FormatGitHubMarkdown(entities, events)
+	if !strings.Contains(out, "## Open (1)") {
+		t.Fatalf("expected Open group header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "## Merged (1)") {
+		t.Fatalf("expected Merged group header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "## Closed (1)") {
+		t.Fatalf("expected Closed group header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "- mozilla/gecko-dev#1234 [pull] Fix login redirect loop") {
+		t.Fatalf("expected primary entity line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Author: user1 | Review: approved | Checks: passing") {
+		t.Fatalf("expected details line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "First seen: "+entities[2].FirstSeenAt.Format("2006-01-02")+" (signal)") {
+		t.Fatalf("expected fallback first-seen source from events, got:\n%s", out)
+	}
+
+	empty := FormatGitHubMarkdown(nil, nil)
+	if empty != "No GitHub entities found.\n" {
+		t.Fatalf("unexpected empty output: %q", empty)
+	}
+}
+
+func TestFormatGitHubJSON(t *testing.T) {
+	now := time.Date(2026, 2, 25, 12, 0, 0, 0, time.UTC)
+	ghUpdated := time.Date(2026, 2, 24, 8, 30, 0, 0, time.UTC)
+	review := "approved"
+	checks := "passing"
+	entities := []GitHubEntity{
+		{
+			Owner:           "mozilla",
+			Repo:            "gecko-dev",
+			Number:          1234,
+			Kind:            "pull",
+			Title:           "Fix login redirect loop",
+			State:           "open",
+			Author:          "user1",
+			Assignees:       "user1,user2",
+			ReviewStatus:    &review,
+			ChecksStatus:    &checks,
+			FirstSeenAt:     time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+			FirstSeenSource: "tab",
+			LastRefreshedAt: &now,
+			GHUpdatedAt:     &ghUpdated,
+		},
+	}
+
+	out, err := FormatGitHubJSON(entities)
+	if err != nil {
+		t.Fatalf("FormatGitHubJSON: %v", err)
+	}
+
+	var got []GitHubJSONOutput
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("json.Unmarshal: %v\noutput:\n%s", err, out)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 entity, got %d", len(got))
+	}
+	row := got[0]
+	if row.Owner != "mozilla" || row.Repo != "gecko-dev" || row.Number != 1234 {
+		t.Fatalf("unexpected identity fields: %+v", row)
+	}
+	if row.URL != "https://github.com/mozilla/gecko-dev/pull/1234" {
+		t.Fatalf("unexpected url: %q", row.URL)
+	}
+	if row.ReviewStatus != "approved" || row.ChecksStatus != "passing" {
+		t.Fatalf("unexpected status fields: %+v", row)
+	}
+	if row.FirstSeenAt != "2026-01-15T10:00:00Z" || row.LastRefreshedAt != "2026-02-25T12:00:00Z" || row.GHUpdatedAt != "2026-02-24T08:30:00Z" {
+		t.Fatalf("unexpected timestamps: %+v", row)
+	}
+
+	empty, err := FormatGitHubJSON(nil)
+	if err != nil {
+		t.Fatalf("FormatGitHubJSON(empty): %v", err)
+	}
+	if strings.TrimSpace(empty) != "[]" {
+		t.Fatalf("expected empty json array, got %q", empty)
+	}
+}
+
+func ptrTime(t time.Time) *time.Time {
+	return &t
 }
