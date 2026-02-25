@@ -348,6 +348,8 @@ func (v GitHubView) ViewList() string {
 	openStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	mergedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("135"))
 	closedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	ciFailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	ciPendingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	filterStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 
 	var b strings.Builder
@@ -397,14 +399,34 @@ func (v GitHubView) ViewList() string {
 				indent = "    "
 			}
 
+			// CI badge for PRs with non-passing checks
+			ciBadge := ""
+			if e.Kind == "pull" && e.ChecksStatus != nil {
+				switch *e.ChecksStatus {
+				case "failing":
+					ciBadge = ciFailStyle.Render("✗")
+				case "pending":
+					ciBadge = ciPendingStyle.Render("◌")
+				}
+			}
+
 			title := e.Title
+			badgeLen := 0
+			if ciBadge != "" {
+				badgeLen = 2 // badge char + space
+			}
 			maxRef := treeWidth - len(indent) - 2 - 2 // prefix + spaces
-			maxTitle := maxRef - len(ref) - 2
+			maxTitle := maxRef - len(ref) - 2 - badgeLen
 			if maxTitle > 0 && len(title) > maxTitle {
 				title = title[:maxTitle-1] + "…"
 			}
 
-			line = indent + style.Render(prefix) + " " + style.Render(ref) + "  " + title
+			row := indent + style.Render(prefix) + " " + style.Render(ref) + "  "
+			if ciBadge != "" {
+				row += ciBadge + " "
+			}
+			row += title
+			line = row
 		}
 
 		if i == v.cursor {
