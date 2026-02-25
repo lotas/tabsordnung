@@ -28,6 +28,8 @@ This software is provided "as-is". The author is not responsible for any account
 ```
 tabsordnung                              # TUI (default)
 tabsordnung export                       # Export tabs to stdout or file
+tabsordnung signals <command>            # List/complete/reopen activity signals
+tabsordnung github [list]                # List tracked GitHub entities
 tabsordnung profiles                     # List Firefox profiles
 tabsordnung snapshot <command>           # Manage tab snapshots
 tabsordnung triage                       # Classify GitHub tabs into groups
@@ -50,10 +52,31 @@ tabsordnung [--profile X] [--stale-days N] [--live] [--port N]
 ### Export
 
 ```
-tabsordnung export [--profile X] [--format md|json] [--out FILE] [--live] [--port N]
+tabsordnung export [--profile X] [--json] [--out FILE] [--live] [--port N]
 ```
 
 Exports tabs to stdout or a file. Use `--live` to export from the Firefox extension instead of session files.
+
+### Signals
+
+List active or completed activity signals captured from Gmail/Slack/Matrix.
+
+```
+tabsordnung signals
+tabsordnung signals list [--all] [--json] [--source gmail|slack|matrix]
+tabsordnung signals complete <id>
+tabsordnung signals reopen <id>
+```
+
+### GitHub Entities
+
+List tracked GitHub issues/PRs discovered from tabs and signals. Markdown output by default, JSON with `--json`.
+
+```
+tabsordnung github
+tabsordnung github [--json] [--all] [--state open|closed|merged] [--kind pull|issue] [--repo owner/repo]
+tabsordnung github list [--json] [--all] [--state open|closed|merged] [--kind pull|issue] [--repo owner/repo]
+```
 
 ### Profiles
 

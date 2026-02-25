@@ -24,11 +24,24 @@ Go TUI app built with Bubble Tea that reads Firefox session files and analyzes t
 
 **Data flow**: `main.go` → profile discovery → session file read (mozlz4 decompress) → JSON parse → analysis → TUI display
 
+## CLI Commands
+
+Main subcommands in `main.go`:
+
+- `tabsordnung` (default TUI)
+- `tabsordnung export [--json] [--out FILE] [--live] [--port N]`
+- `tabsordnung snapshot ...`
+- `tabsordnung triage ...`
+- `tabsordnung summarize ...`
+- `tabsordnung signals list [--all] [--json] [--source X]`
+- `tabsordnung github [list] [--json] [--all] [--state open|closed|merged] [--kind pull|issue] [--repo owner/repo]`
+
 ### Packages
 
 - **`internal/types/`** — Shared types: `Tab`, `TabGroup`, `Profile`, `SessionData`, `Stats`, `FilterMode`, `SortMode`
 - **`internal/firefox/`** — Profile discovery (`profiles.ini` parsing) and session reading (mozlz4 decompression + JSON parse)
 - **`internal/analyzer/`** — Stale detection, duplicate detection (URL normalization), dead link checking (async HTTP HEAD with concurrency limit of 10), summary stats
+- **`internal/storage/`** — SQLite schema, snapshots, signals, and tracked GitHub entities
 - **`internal/tui/`** — Bubble Tea models: `app.go` (main model), `tree.go` (collapsible group tree), `detail.go` (right pane), `profile_picker.go` (profile selection overlay)
 
 ### Key Technical Details
