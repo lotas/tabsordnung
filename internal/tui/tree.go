@@ -32,6 +32,7 @@ type TreeModel struct {
 	Width            int
 	Height           int
 	Filter           types.FilterMode
+	DisplayMode      types.TabDisplayMode
 }
 
 func NewTreeModel(groups []*types.TabGroup) TreeModel {
@@ -40,9 +41,10 @@ func NewTreeModel(groups []*types.TabGroup) TreeModel {
 		expanded[g.ID] = !g.Collapsed
 	}
 	return TreeModel{
-		Groups:   groups,
-		Expanded: expanded,
-		Selected: make(map[int]bool),
+		Groups:      groups,
+		Expanded:    expanded,
+		Selected:    make(map[int]bool),
+		DisplayMode: types.TabDisplayTitle,
 	}
 }
 
@@ -157,6 +159,41 @@ func (m *TreeModel) MoveDown() {
 	}
 	if m.Cursor >= m.Offset+visibleRows {
 		m.Offset = m.Cursor - visibleRows + 1
+	}
+}
+
+// CycleDisplayMode advances the tab display mode: URL → Title → Both → URL.
+func (m *TreeModel) CycleDisplayMode() {
+	m.DisplayMode = (m.DisplayMode + 1) % 3
+}
+
+// tabLabel returns the display text for a tab, truncated to fit availWidth.
+func (m *TreeModel) tabLabel(tab *types.Tab, availWidth int) string {
+	url := tab.URL
+	title := tab.Title
+	if title == "" {
+		title = url
+	}
+	switch m.DisplayMode {
+	case types.TabDisplayURL:
+		if len(url) > availWidth {
+			return url[:availWidth-1] + "…"
+		}
+		return url
+	case types.TabDisplayBoth:
+		combined := title + " · " + url
+		if len(combined) <= availWidth {
+			return combined
+		}
+		if availWidth > 1 {
+			return combined[:availWidth-1] + "…"
+		}
+		return combined[:availWidth]
+	default: // TabDisplayTitle
+		if len(title) > availWidth {
+			return title[:availWidth-1] + "…"
+		}
+		return title
 	}
 }
 
@@ -322,16 +359,13 @@ func (m TreeModel) View() string {
 				marker = strings.Join(markers, "") + " "
 			}
 
-			// Truncate URL to fit width
-			maxURLLen := m.Width - len(prefix) - len(marker) - 2
-			if maxURLLen < 10 {
-				maxURLLen = 10
+			// Build tab label according to current display mode
+			maxLabelLen := m.Width - len(prefix) - len(marker) - 2
+			if maxLabelLen < 10 {
+				maxLabelLen = 10
 			}
-			url := node.Tab.URL
-			if len(url) > maxURLLen {
-				url = url[:maxURLLen-1] + "…"
-			}
-			line = prefix + marker + url
+			label := m.tabLabel(node.Tab, maxLabelLen)
+			line = prefix + marker + label
 		}
 
 		// Apply cursor highlight

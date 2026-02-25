@@ -91,3 +91,12 @@ const (
 	SortByAge
 	SortByStatus
 )
+
+// TabDisplayMode controls what text is shown for each tab in the tree.
+type TabDisplayMode int
+
+const (
+	TabDisplayURL   TabDisplayMode = iota // show URL (default)
+	TabDisplayTitle                       // show page title
+	TabDisplayBoth                        // show "Title · URL" truncated
+)

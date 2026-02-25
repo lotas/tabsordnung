@@ -62,6 +62,7 @@ type TabsView struct {
 
 func NewTabsView(srv *server.Server, db *sql.DB, summaryDir, ollamaModel, ollamaHost string) TabsView {
 	return TabsView{
+		tree:            TreeModel{DisplayMode: types.TabDisplayTitle},
 		selected:        make(map[int]bool),
 		summarizeJobs:   make(map[string]*SummarizeJob),
 		summarizeErrors: make(map[string]string),
@@ -199,12 +200,14 @@ func (v *TabsView) RebuildTree() {
 	oldExpanded := v.tree.Expanded
 	oldFilter := v.tree.Filter
 	oldSavedExpanded := v.tree.SavedExpanded
+	oldDisplayMode := v.tree.DisplayMode
 
 	v.tree = NewTreeModel(v.session.Groups)
 	v.tree.Width = v.width * TreeWidthPct / 100
 	v.tree.Height = v.height - 4
 	v.tree.Filter = oldFilter
 	v.tree.SavedExpanded = oldSavedExpanded
+	v.tree.DisplayMode = oldDisplayMode
 	v.tree.SummaryDir = v.summaryDir
 	if v.db != nil {
 		v.tree.SignalCounts, _ = storage.ActiveSignalCounts(v.db)
@@ -423,6 +426,8 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 			job := &SignalJob{Tab: node.Tab, Source: source}
 			v.signalQueue = append(v.signalQueue, job)
 			return v, v.processNextSignal()
+		case "t":
+			v.tree.CycleDisplayMode()
 		case "f":
 			return v, func() tea.Msg { return showFilterPickerMsg{} }
 		case "r":
@@ -581,6 +586,8 @@ func (v TabsView) BottomBar() string {
 	}
 	filterNames := []string{"all", "stale", "dead", "duplicate", ">7d", ">30d", ">90d", "gh done", "summarized", "unsummarized"}
 	filterStr := fmt.Sprintf("[filter: %s]", filterNames[v.tree.Filter])
-	s += "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 f filter \u00b7 r refresh \u00b7 p source \u00b7 q quit  " + filterStr
+	displayNames := []string{"URL", "Title", "Both"}
+	displayStr := fmt.Sprintf("[T: %s]", displayNames[v.tree.DisplayMode])
+	s += "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 f filter \u00b7 t display \u00b7 r refresh \u00b7 p source \u00b7 q quit  " + filterStr + " " + displayStr
 	return s
 }
