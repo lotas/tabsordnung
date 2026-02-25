@@ -187,6 +187,38 @@ ALTER TABLE signals_new RENAME TO signals;`,
 ALTER TABLE signals ADD COLUMN urgency TEXT;
 ALTER TABLE signals ADD COLUMN urgency_source TEXT;`,
 	},
+	{
+		Version:     7,
+		Description: "create github_entities and github_entity_events tables",
+		SQL: `
+CREATE TABLE github_entities (
+    id                INTEGER PRIMARY KEY,
+    owner             TEXT NOT NULL,
+    repo              TEXT NOT NULL,
+    number            INTEGER NOT NULL,
+    kind              TEXT NOT NULL,
+    title             TEXT DEFAULT '',
+    state             TEXT DEFAULT '',
+    author            TEXT DEFAULT '',
+    assignees         TEXT DEFAULT '',
+    review_status     TEXT,
+    checks_status     TEXT,
+    first_seen_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    first_seen_source TEXT NOT NULL DEFAULT '',
+    last_refreshed_at DATETIME,
+    gh_updated_at     DATETIME,
+    UNIQUE(owner, repo, number)
+);
+CREATE TABLE github_entity_events (
+    id          INTEGER PRIMARY KEY,
+    entity_id   INTEGER NOT NULL REFERENCES github_entities(id) ON DELETE CASCADE,
+    event_type  TEXT NOT NULL,
+    signal_id   INTEGER REFERENCES signals(id),
+    snapshot_id INTEGER REFERENCES snapshots(id),
+    detail      TEXT DEFAULT '',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.
@@ -274,6 +306,13 @@ func runMigrations(db *sql.DB) error {
 		); err != nil {
 			return fmt.Errorf("record migration %d: %w", m.Version, err)
 		}
+	}
+
+	// Run one-time backfill for GitHub entities after first migration.
+	var ghCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM github_entities").Scan(&ghCount); err == nil && ghCount == 0 {
+		// Table exists but is empty — backfill from existing data
+		BackfillGitHubEntities(db)
 	}
 
 	return nil

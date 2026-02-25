@@ -14,9 +14,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lotas/tabsordnung/internal/analyzer"
-	"github.com/lotas/tabsordnung/internal/classify"
 	"github.com/lotas/tabsordnung/internal/applog"
+	"github.com/lotas/tabsordnung/internal/classify"
 	"github.com/lotas/tabsordnung/internal/firefox"
+	"github.com/lotas/tabsordnung/internal/github"
 	"github.com/lotas/tabsordnung/internal/server"
 	"github.com/lotas/tabsordnung/internal/signal"
 	"github.com/lotas/tabsordnung/internal/storage"
@@ -170,6 +171,7 @@ type Model struct {
 	activeView    ViewType
 	tabsView      TabsView
 	signalsView   SignalsView
+	githubView    GitHubView
 	snapshotsView SnapshotsView
 
 	// Debounced rebuild
@@ -191,6 +193,7 @@ func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *serve
 	m.tabsView = NewTabsView(srv, db, summaryDir, ollamaModel, ollamaHost)
 	m.tabsView.staleDays = staleDays
 	m.signalsView = NewSignalsView(db)
+	m.githubView = NewGitHubView(db)
 	m.snapshotsView = NewSnapshotsView(db)
 	if liveMode {
 		m.mode = ModeLive
@@ -415,6 +418,33 @@ func setUrgencyCmd(db *sql.DB, id int64, urgency string, source string) tea.Cmd 
 	}
 }
 
+func extractGitHubFromRecentSignals(db *sql.DB, source string) tea.Cmd {
+	return func() tea.Msg {
+		signals, err := storage.ListSignals(db, source, false)
+		if err != nil {
+			return nil
+		}
+		storage.ExtractGitHubFromSignals(db, signals)
+		return nil
+	}
+}
+
+// refreshGitHubEntitiesCmd triggers a background gh refresh (respects cooldown).
+func refreshGitHubEntitiesCmd(db *sql.DB) tea.Cmd {
+	return func() tea.Msg {
+		token := resolveGHToken()
+		if token == "" {
+			return nil
+		}
+		entities, err := storage.ListGitHubEntities(db, storage.GitHubFilter{})
+		if err != nil || len(entities) == 0 {
+			return nil
+		}
+		github.RefreshEntities(db, entities, token, false)
+		return githubRefreshDoneMsg{}
+	}
+}
+
 func listenWebSocket(srv *server.Server) tea.Cmd {
 	return func() tea.Msg {
 		for {
@@ -507,6 +537,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.picker.Height = m.height
 		paneHeight := m.height - 4
 		m.signalsView.SetSize(m.width, paneHeight)
+		m.githubView.SetSize(m.width, paneHeight)
 		m.snapshotsView.SetSize(m.width, paneHeight)
 		return m, nil
 
@@ -528,6 +559,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "3":
+				if m.activeView != ViewGitHub {
+					m.activeView = ViewGitHub
+					return m, m.githubView.Reload()
+				}
+				return m, nil
+			case "4":
 				if m.activeView != ViewSnapshots {
 					m.activeView = ViewSnapshots
 					if !m.snapshotsView.loaded {
@@ -574,6 +611,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ViewSignals:
 			v, cmd := m.signalsView.Update(msg)
 			m.signalsView = v
+			return m, cmd
+
+		case ViewGitHub:
+			v, cmd := m.githubView.Update(msg)
+			m.githubView = v
 			return m, cmd
 
 		case ViewSnapshots:
@@ -696,6 +738,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeView == ViewSignals {
 			cmds = append(cmds, m.signalsView.Reload())
 		}
+		// Extract GitHub entities from recently reconciled signals and refresh
+		cmds = append(cmds, extractGitHubFromRecentSignals(m.db, msg.source))
+		cmds = append(cmds, refreshGitHubEntitiesCmd(m.db))
 		return m, tea.Batch(cmds...)
 
 	case signalActionMsg:
@@ -779,6 +824,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			listenWebSocket(m.server),
 			signalPollTick(),
 			classifyTick(),
+			refreshGitHubEntitiesCmd(m.db),
 		)
 
 	case wsDisconnectedMsg:
@@ -905,6 +951,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, listenWebSocket(m.server)
+
+	case githubViewLoadedMsg:
+		v, cmd := m.githubView.Update(msg)
+		m.githubView = v
+		return m, cmd
+
+	case githubRefreshDoneMsg:
+		v, cmd := m.githubView.Update(msg)
+		m.githubView = v
+		return m, cmd
 
 	case signalsViewLoadedMsg:
 		v, cmd := m.signalsView.Update(msg)
@@ -1056,11 +1112,13 @@ func (m Model) View() string {
 	if m.activeView == ViewTabs && m.session != nil {
 		statsStr = m.tabsView.StatsString()
 	}
-	var viewCounts [3]int
+	var viewCounts [4]int
 	viewCounts[ViewTabs] = m.tabsView.stats.TotalTabs
 	for _, c := range m.tabsView.tree.SignalCounts {
 		viewCounts[ViewSignals] += c
 	}
+	ghCount, _ := storage.OpenGitHubEntityCount(m.db)
+	viewCounts[ViewGitHub] = ghCount
 	viewCounts[ViewSnapshots] = len(m.snapshotsView.snapshots)
 	navbar := renderNavbar(m.activeView, profileName, viewCounts, statsStr, m.width)
 
@@ -1082,6 +1140,11 @@ func (m Model) View() string {
 		isFocusDetail = m.signalsView.FocusDetail()
 		leftContent = m.signalsView.ViewList()
 		rightContent = m.signalsView.ViewDetail()
+
+	case ViewGitHub:
+		isFocusDetail = m.githubView.FocusDetail()
+		leftContent = m.githubView.ViewList()
+		rightContent = m.githubView.ViewDetail()
 
 	case ViewSnapshots:
 		isFocusDetail = m.snapshotsView.FocusDetail()
@@ -1121,9 +1184,11 @@ func (m Model) View() string {
 	case ViewTabs:
 		bottomText = m.tabsView.BottomBar()
 	case ViewSignals:
-		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 open \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 [/] urgency \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
+		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 open \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 [/] urgency \u00b7 1-4 view \u00b7 p source \u00b7 q quit"
+	case ViewGitHub:
+		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 detail \u00b7 tab focus \u00b7 t tree \u00b7 f filter \u00b7 r refresh \u00b7 o browser \u00b7 1-4 view \u00b7 q quit"
 	case ViewSnapshots:
-		bottomText = "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 1-3 view \u00b7 p source \u00b7 q quit"
+		bottomText = "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 1-4 view \u00b7 p source \u00b7 q quit"
 	}
 	bottomBar := bottomBarStyle.Render(bottomText)
 

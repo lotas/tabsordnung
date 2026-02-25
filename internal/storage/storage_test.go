@@ -577,6 +577,30 @@ func TestReconcileSignals_HeuristicUrgency(t *testing.T) {
 	}
 }
 
+func TestGitHubTablesExist(t *testing.T) {
+	db := testDB(t)
+
+	// github_entities table should exist after migration
+	_, err := db.Exec(`INSERT INTO github_entities (owner, repo, number, kind, first_seen_source)
+		VALUES ('mozilla', 'gecko-dev', 123, 'pull', 'tab')`)
+	if err != nil {
+		t.Fatalf("insert into github_entities: %v", err)
+	}
+
+	// Same owner/repo/number should be rejected
+	_, err = db.Exec(`INSERT INTO github_entities (owner, repo, number, kind, first_seen_source)
+		VALUES ('mozilla', 'gecko-dev', 123, 'pull', 'tab')`)
+	if err == nil {
+		t.Fatal("expected unique constraint violation")
+	}
+
+	// github_entity_events table should exist
+	_, err = db.Exec(`INSERT INTO github_entity_events (entity_id, event_type) VALUES (1, 'tab_seen')`)
+	if err != nil {
+		t.Fatalf("insert into github_entity_events: %v", err)
+	}
+}
+
 func TestMigration6_UrgencyColumns(t *testing.T) {
 	db := testDB(t)
 

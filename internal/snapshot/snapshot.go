@@ -91,6 +91,16 @@ func Create(db *sql.DB, session *types.SessionData, label string) (rev int, crea
 		return 0, false, nil, err
 	}
 
+	// Extract GitHub entities from new snapshot tabs.
+	var snapshotID int64
+	if err := db.QueryRow("SELECT id FROM snapshots WHERE profile = ? AND rev = ?", profile, newRev).Scan(&snapshotID); err == nil && snapshotID > 0 {
+		if n, ghErr := storage.ExtractGitHubFromSnapshot(db, snapshotID); ghErr != nil {
+			applog.Error("snapshot.github.extract", ghErr)
+		} else if n > 0 {
+			applog.Info("snapshot.github.extract", "entities", n, "rev", newRev)
+		}
+	}
+
 	applog.Info("snapshot.created", "rev", newRev, "tabs", len(tabs), "profile", profile)
 
 	// Compute diff for output (only if there was a previous snapshot).
