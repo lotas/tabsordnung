@@ -601,6 +601,30 @@ func TestGitHubTablesExist(t *testing.T) {
 	}
 }
 
+func TestBugzillaTablesExist(t *testing.T) {
+	db := testDB(t)
+
+	// bugzilla_entities table should exist after migration
+	_, err := db.Exec(`INSERT INTO bugzilla_entities (host, bug_id, first_seen_source)
+		VALUES ('bugzilla.mozilla.org', 1900001, 'tab')`)
+	if err != nil {
+		t.Fatalf("insert into bugzilla_entities: %v", err)
+	}
+
+	// Same host+bug_id should be rejected
+	_, err = db.Exec(`INSERT INTO bugzilla_entities (host, bug_id, first_seen_source)
+		VALUES ('bugzilla.mozilla.org', 1900001, 'signal')`)
+	if err == nil {
+		t.Fatal("expected unique constraint violation")
+	}
+
+	// bugzilla_entity_events table should exist
+	_, err = db.Exec(`INSERT INTO bugzilla_entity_events (entity_id, event_type) VALUES (1, 'tab_seen')`)
+	if err != nil {
+		t.Fatalf("insert into bugzilla_entity_events: %v", err)
+	}
+}
+
 func TestMigration6_UrgencyColumns(t *testing.T) {
 	db := testDB(t)
 
@@ -624,5 +648,29 @@ func TestMigration6_UrgencyColumns(t *testing.T) {
 	}
 	if urgencySource.Valid {
 		t.Errorf("expected NULL urgency_source, got %q", urgencySource.String)
+	}
+}
+
+func TestBugzillaEntityNewColumns(t *testing.T) {
+	db := testDB(t)
+	var title, status, resolution, assignee string
+	var lastRefreshed sql.NullTime
+	_, err := db.Exec(`INSERT INTO bugzilla_entities
+		(host, bug_id, first_seen_source, title, status, resolution, assignee)
+		VALUES ('bugzilla.mozilla.org', 9000001, 'tab', 'Test Title', 'RESOLVED', 'FIXED', 'dev@example.com')`)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	err = db.QueryRow(`SELECT title, status, resolution, assignee, last_refreshed_at
+		FROM bugzilla_entities WHERE bug_id = 9000001`).
+		Scan(&title, &status, &resolution, &assignee, &lastRefreshed)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if title != "Test Title" || status != "RESOLVED" || resolution != "FIXED" || assignee != "dev@example.com" {
+		t.Errorf("got title=%q status=%q resolution=%q assignee=%q", title, status, resolution, assignee)
+	}
+	if lastRefreshed.Valid {
+		t.Error("last_refreshed_at should be NULL initially")
 	}
 }

@@ -172,6 +172,7 @@ type Model struct {
 	tabsView      TabsView
 	signalsView   SignalsView
 	githubView    GitHubView
+	bugzillaView  BugzillaView
 	snapshotsView SnapshotsView
 
 	// Debounced rebuild
@@ -194,6 +195,7 @@ func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *serve
 	m.tabsView.staleDays = staleDays
 	m.signalsView = NewSignalsView(db)
 	m.githubView = NewGitHubView(db)
+	m.bugzillaView = NewBugzillaView(db)
 	m.snapshotsView = NewSnapshotsView(db)
 	if liveMode {
 		m.mode = ModeLive
@@ -429,6 +431,17 @@ func extractGitHubFromRecentSignals(db *sql.DB, source string) tea.Cmd {
 	}
 }
 
+func extractBugzillaFromRecentSignals(db *sql.DB, source string) tea.Cmd {
+	return func() tea.Msg {
+		signals, err := storage.ListSignals(db, source, false)
+		if err != nil {
+			return nil
+		}
+		storage.ExtractBugzillaFromSignals(db, signals)
+		return nil
+	}
+}
+
 // refreshGitHubEntitiesCmd triggers a background gh refresh (respects cooldown).
 func refreshGitHubEntitiesCmd(db *sql.DB) tea.Cmd {
 	return func() tea.Msg {
@@ -538,6 +551,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		paneHeight := m.height - 4
 		m.signalsView.SetSize(m.width, paneHeight)
 		m.githubView.SetSize(m.width, paneHeight)
+		m.bugzillaView.SetSize(m.width, paneHeight)
 		m.snapshotsView.SetSize(m.width, paneHeight)
 		return m, nil
 
@@ -565,6 +579,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "4":
+				if m.activeView != ViewBugzilla {
+					m.activeView = ViewBugzilla
+					return m, m.bugzillaView.Reload()
+				}
+				return m, nil
+			case "5":
 				if m.activeView != ViewSnapshots {
 					m.activeView = ViewSnapshots
 					if !m.snapshotsView.loaded {
@@ -616,6 +636,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ViewGitHub:
 			v, cmd := m.githubView.Update(msg)
 			m.githubView = v
+			return m, cmd
+
+		case ViewBugzilla:
+			v, cmd := m.bugzillaView.Update(msg)
+			m.bugzillaView = v
 			return m, cmd
 
 		case ViewSnapshots:
@@ -740,6 +765,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Extract GitHub entities from recently reconciled signals and refresh
 		cmds = append(cmds, extractGitHubFromRecentSignals(m.db, msg.source))
+		cmds = append(cmds, extractBugzillaFromRecentSignals(m.db, msg.source))
 		cmds = append(cmds, refreshGitHubEntitiesCmd(m.db))
 		return m, tea.Batch(cmds...)
 
@@ -962,6 +988,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.githubView = v
 		return m, cmd
 
+	case bugzillaViewLoadedMsg:
+		v, cmd := m.bugzillaView.Update(msg)
+		m.bugzillaView = v
+		return m, cmd
+
 	case signalsViewLoadedMsg:
 		v, cmd := m.signalsView.Update(msg)
 		m.signalsView = v
@@ -1112,13 +1143,15 @@ func (m Model) View() string {
 	if m.activeView == ViewTabs && m.session != nil {
 		statsStr = m.tabsView.StatsString()
 	}
-	var viewCounts [4]int
+	var viewCounts [5]int
 	viewCounts[ViewTabs] = m.tabsView.stats.TotalTabs
 	for _, c := range m.tabsView.tree.SignalCounts {
 		viewCounts[ViewSignals] += c
 	}
 	ghCount, _ := storage.OpenGitHubEntityCount(m.db)
 	viewCounts[ViewGitHub] = ghCount
+	bzCount, _ := storage.BugzillaEntityCount(m.db)
+	viewCounts[ViewBugzilla] = bzCount
 	viewCounts[ViewSnapshots] = len(m.snapshotsView.snapshots)
 	navbar := renderNavbar(m.activeView, profileName, viewCounts, statsStr, m.width)
 
@@ -1145,6 +1178,11 @@ func (m Model) View() string {
 		isFocusDetail = m.githubView.FocusDetail()
 		leftContent = m.githubView.ViewList()
 		rightContent = m.githubView.ViewDetail()
+
+	case ViewBugzilla:
+		isFocusDetail = m.bugzillaView.FocusDetail()
+		leftContent = m.bugzillaView.ViewList()
+		rightContent = m.bugzillaView.ViewDetail()
 
 	case ViewSnapshots:
 		isFocusDetail = m.snapshotsView.FocusDetail()
@@ -1184,11 +1222,13 @@ func (m Model) View() string {
 	case ViewTabs:
 		bottomText = m.tabsView.BottomBar()
 	case ViewSignals:
-		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 open \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 [/] urgency \u00b7 1-4 view \u00b7 p source \u00b7 q quit"
+		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 open \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 [/] urgency \u00b7 1-5 view \u00b7 p source \u00b7 q quit"
 	case ViewGitHub:
-		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 detail \u00b7 tab focus \u00b7 t tree \u00b7 f filter \u00b7 r refresh \u00b7 o browser \u00b7 1-4 view \u00b7 q quit"
+		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 detail \u00b7 tab focus \u00b7 t tree \u00b7 f filter \u00b7 r refresh \u00b7 o browser \u00b7 1-5 view \u00b7 q quit"
+	case ViewBugzilla:
+		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 detail \u00b7 tab focus \u00b7 t tree \u00b7 f filter \u00b7 r reload \u00b7 o browser \u00b7 1-5 view \u00b7 q quit"
 	case ViewSnapshots:
-		bottomText = "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 1-4 view \u00b7 p source \u00b7 q quit"
+		bottomText = "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 1-5 view \u00b7 p source \u00b7 q quit"
 	}
 	bottomBar := bottomBarStyle.Render(bottomText)
 

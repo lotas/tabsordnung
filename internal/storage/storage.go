@@ -32,7 +32,7 @@ type SnapshotGroup struct {
 type SnapshotTab struct {
 	URL        string
 	Title      string
-	GroupIndex *int   // index into groups slice; nil = ungrouped
+	GroupIndex *int // index into groups slice; nil = ungrouped
 	Pinned     bool
 	GroupName  string // populated by GetSnapshot
 }
@@ -219,6 +219,33 @@ CREATE TABLE github_entity_events (
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );`,
 	},
+	{
+		Version:     8,
+		Description: "create bugzilla_entities and bugzilla_entity_events tables",
+		SQL: `
+CREATE TABLE bugzilla_entities (
+    id                INTEGER PRIMARY KEY,
+    host              TEXT NOT NULL,
+    bug_id            INTEGER NOT NULL,
+    title             TEXT NOT NULL DEFAULT '',
+    status            TEXT NOT NULL DEFAULT '',
+    resolution        TEXT NOT NULL DEFAULT '',
+    assignee          TEXT NOT NULL DEFAULT '',
+    first_seen_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    first_seen_source TEXT NOT NULL DEFAULT '',
+    last_refreshed_at DATETIME,
+    UNIQUE(host, bug_id)
+);
+CREATE TABLE bugzilla_entity_events (
+    id          INTEGER PRIMARY KEY,
+    entity_id   INTEGER NOT NULL REFERENCES bugzilla_entities(id) ON DELETE CASCADE,
+    event_type  TEXT NOT NULL,
+    signal_id   INTEGER REFERENCES signals(id),
+    snapshot_id INTEGER REFERENCES snapshots(id),
+    detail      TEXT DEFAULT '',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.
@@ -313,6 +340,11 @@ func runMigrations(db *sql.DB) error {
 	if err := db.QueryRow("SELECT COUNT(*) FROM github_entities").Scan(&ghCount); err == nil && ghCount == 0 {
 		// Table exists but is empty — backfill from existing data
 		BackfillGitHubEntities(db)
+	}
+	var bzCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM bugzilla_entities").Scan(&bzCount); err == nil && bzCount == 0 {
+		// Table exists but is empty — backfill from existing data
+		BackfillBugzillaEntities(db)
 	}
 
 	return nil

@@ -12,15 +12,16 @@ const (
 	ViewTabs ViewType = iota
 	ViewSignals
 	ViewGitHub
+	ViewBugzilla
 	ViewSnapshots
 )
 
 // TreeWidthPct is the percentage of terminal width used for the left (tree/list) pane.
 const TreeWidthPct = 50
 
-var viewNames = []string{"Tabs", "Signals", "GitHub", "Snapshots"}
+var viewNames = []string{"Tabs", "Signals", "GitHub", "Bugzilla", "Snapshots"}
 
-func renderNavbar(active ViewType, profileName string, counts [4]int, stats string, width int) string {
+func renderNavbar(active ViewType, profileName string, counts [5]int, stats string, width int) string {
 	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62")).Underline(true)
 	inactiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	countStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))

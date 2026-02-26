@@ -52,6 +52,9 @@ func main() {
 		case "github":
 			runGitHub(os.Args[2:])
 			return
+		case "bugzilla":
+			runBugzilla(os.Args[2:])
+			return
 		case "rules":
 			runRules(os.Args[2:])
 			return
@@ -171,6 +174,8 @@ Usage:
 
   tabsordnung github                                     List open GitHub entities
   tabsordnung github list [--all] [--json] [--state X] [--kind X] [--repo owner/repo]  List tracked GitHub entities
+  tabsordnung bugzilla                                   List tracked Bugzilla issues
+  tabsordnung bugzilla list [--json] [--host domain]    List tracked Bugzilla issues
 
   tabsordnung rules view                               Show urgency classification rules
   tabsordnung rules edit                               Open rules file in $EDITOR
@@ -888,6 +893,76 @@ func runGitHub(args []string) {
 		fmt.Fprintf(os.Stderr, "Unknown github command %q. Use list.\n", subcmd)
 		os.Exit(1)
 	}
+}
+
+func runBugzilla(args []string) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		runBugzillaList(args)
+		return
+	}
+
+	subcmd := args[0]
+	subArgs := args[1:]
+
+	switch subcmd {
+	case "list":
+		runBugzillaList(subArgs)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown bugzilla command %q. Use list.\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func runBugzillaList(args []string) {
+	fs := flag.NewFlagSet("bugzilla list", flag.ExitOnError)
+	jsonFlag := fs.Bool("json", false, "Output as JSON")
+	host := fs.String("host", "", "Filter by Bugzilla host (e.g. bugzilla.mozilla.org)")
+	fs.Parse(args)
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	entities, err := storage.ListBugzillaEntities(db)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing bugzilla issues: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *host != "" {
+		filtered := make([]storage.BugzillaEntity, 0, len(entities))
+		for _, e := range entities {
+			if e.Host == *host {
+				filtered = append(filtered, e)
+			}
+		}
+		entities = filtered
+	}
+
+	if *jsonFlag {
+		out, err := storage.FormatBugzillaJSON(entities)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(out)
+		return
+	}
+
+	events := make(map[int64][]storage.BugzillaEntityEvent, len(entities))
+	for _, entity := range entities {
+		ev, err := storage.ListBugzillaEntityEvents(db, entity.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing bugzilla events for issue %d: %v\n", entity.ID, err)
+			os.Exit(1)
+		}
+		events[entity.ID] = ev
+	}
+
+	fmt.Print(storage.FormatBugzillaMarkdown(entities, events))
 }
 
 func runGitHubList(args []string) {

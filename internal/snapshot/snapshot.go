@@ -99,6 +99,11 @@ func Create(db *sql.DB, session *types.SessionData, label string) (rev int, crea
 		} else if n > 0 {
 			applog.Info("snapshot.github.extract", "entities", n, "rev", newRev)
 		}
+		if n, bzErr := storage.ExtractBugzillaFromSnapshot(db, snapshotID); bzErr != nil {
+			applog.Error("snapshot.bugzilla.extract", bzErr)
+		} else if n > 0 {
+			applog.Info("snapshot.bugzilla.extract", "entities", n, "rev", newRev)
+		}
 	}
 
 	applog.Info("snapshot.created", "rev", newRev, "tabs", len(tabs), "profile", profile)
