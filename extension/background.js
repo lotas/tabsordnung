@@ -2,12 +2,18 @@ const PORT = 19191;
 const RECONNECT_BASE_MS = 1000;
 const ALARM_NAME = "keepalive";
 const RECONNECT_MAX_MS = 30000;
+const DWELL_THRESHOLD_MS = 10000;
+const SKIP_PROTOCOLS = ["about:", "moz-extension:", "chrome:", "file:", "data:", "resource:"];
 
 let ws = null;
 let reconnectDelay = RECONNECT_BASE_MS;
 let reconnectTimer = null;
 let pendingPopupRequests = new Map(); // id → {resolve, reject}
 let popupCmdCounter = 0;
+let dwellTimer = null;
+let dwellTabId = null;
+// Per-tab summarize state: "idle" | "pending" | "ready"
+let tabSummarizeState = new Map();
 
 function connect() {
   if (reconnectTimer) {
@@ -47,6 +53,8 @@ function connect() {
       pending.resolve({ connected: false });
     }
     pendingPopupRequests.clear();
+    tabSummarizeState.clear();
+    browser.action.setBadgeText({ text: "" });
     scheduleReconnect();
   });
 
@@ -129,17 +137,54 @@ browser.tabs.onCreated.addListener((tab) => {
 browser.tabs.onRemoved.addListener((tabId) => {
   ensureConnected();
   send({ type: "tab.removed", tabId });
+  tabSummarizeState.delete(tabId);
 });
 
-browser.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
+browser.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   ensureConnected();
   send({ type: "tab.updated", tab: serializeTab(tab) });
+  // Reset dwell timer if the active tab navigated to a new URL
+  if (changeInfo.url && tab.active) {
+    tabSummarizeState.delete(tab.id);
+    updateIcon(tab.id);
+    startDwellTimer(tab.id, tab.url);
+  }
 });
 
 browser.tabs.onMoved.addListener(async (tabId) => {
   ensureConnected();
   const tab = await browser.tabs.get(tabId);
   send({ type: "tab.moved", tab: serializeTab(tab) });
+});
+
+// --- Dwell tracking ---
+
+browser.tabs.onActivated.addListener(async (activeInfo) => {
+  try {
+    const tab = await browser.tabs.get(activeInfo.tabId);
+    updateIcon(tab.id);
+    startDwellTimer(tab.id, tab.url);
+  } catch (e) {
+    clearDwellTimer();
+  }
+});
+
+browser.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === browser.windows.WINDOW_ID_NONE) {
+    clearDwellTimer();
+    return;
+  }
+  try {
+    const [tab] = await browser.tabs.query({ active: true, windowId });
+    if (tab) {
+      updateIcon(tab.id);
+      startDwellTimer(tab.id, tab.url);
+    } else {
+      clearDwellTimer();
+    }
+  } catch (e) {
+    clearDwellTimer();
+  }
 });
 
 // --- Commands ---
@@ -410,6 +455,94 @@ async function handleSummarizeTab() {
       },
     });
   });
+}
+
+// --- Dwell-based auto-summarize ---
+
+function shouldSkipURL(url) {
+  if (!url) return true;
+  return SKIP_PROTOCOLS.some(p => url.startsWith(p));
+}
+
+function updateIcon(tabId) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return; // don't override grey disconnected icon
+  const state = tabSummarizeState.get(tabId) || "idle";
+  switch (state) {
+    case "pending":
+      browser.action.setIcon({ path: { "32": "icons/icon-yellow-32.svg" } });
+      browser.action.setBadgeText({ text: "..." });
+      browser.action.setBadgeBackgroundColor({ color: "#e6a817" });
+      break;
+    case "ready":
+      browser.action.setIcon({ path: { "32": "icons/icon-green-32.svg" } });
+      browser.action.setBadgeText({ text: "\u2713" });
+      browser.action.setBadgeBackgroundColor({ color: "#2ea44f" });
+      break;
+    default:
+      browser.action.setIcon({ path: { "32": "icons/icon-32.svg" } });
+      browser.action.setBadgeText({ text: "" });
+      break;
+  }
+}
+
+function clearDwellTimer() {
+  if (dwellTimer) {
+    clearTimeout(dwellTimer);
+    dwellTimer = null;
+  }
+  dwellTabId = null;
+}
+
+function startDwellTimer(tabId, url) {
+  clearDwellTimer();
+  if (shouldSkipURL(url)) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const currentState = tabSummarizeState.get(tabId);
+  if (currentState === "ready" || currentState === "pending") return;
+
+  dwellTabId = tabId;
+  dwellTimer = setTimeout(() => {
+    dwellTimer = null;
+    sendAutoSummarize(tabId, url);
+  }, DWELL_THRESHOLD_MS);
+}
+
+function sendAutoSummarize(tabId, url) {
+  const id = nextPopupCmdID();
+  tabSummarizeState.set(tabId, "pending");
+  updateIcon(tabId);
+
+  send({ type: "auto-summarize", id, tabId, url });
+
+  pendingPopupRequests.set(id, {
+    resolve: (msg) => {
+      if (msg.error) {
+        tabSummarizeState.delete(tabId);
+      } else {
+        tabSummarizeState.set(tabId, "ready");
+        // Notify popup if open so it can show the summary
+        browser.runtime.sendMessage({ action: "summary-ready", summary: msg.summary }).catch(() => {});
+      }
+      // Only update icon if this tab is still active
+      browser.tabs.query({ active: true, currentWindow: true }).then(([active]) => {
+        if (active && active.id === tabId) {
+          updateIcon(tabId);
+        }
+      });
+    },
+  });
+
+  setTimeout(() => {
+    if (pendingPopupRequests.has(id)) {
+      pendingPopupRequests.delete(id);
+      tabSummarizeState.delete(tabId);
+      browser.tabs.query({ active: true, currentWindow: true }).then(([active]) => {
+        if (active && active.id === tabId) {
+          updateIcon(tabId);
+        }
+      });
+    }
+  }, 120000);
 }
 
 // --- Start ---

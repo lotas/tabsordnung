@@ -134,4 +134,15 @@ async function summarizeTab() {
   }
 }
 
+browser.runtime.onMessage.addListener((message) => {
+  if (message.action === "summary-ready" && message.summary) {
+    $("#summary-spinner").classList.add("hidden");
+    $("#summary-none").classList.add("hidden");
+    $("#summary-error").classList.add("hidden");
+    $("#summary-content").innerHTML = marked.parse(message.summary);
+    $("#summary-content").classList.remove("hidden");
+    $("#summarize-btn").classList.remove("hidden");
+  }
+});
+
 init();

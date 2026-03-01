@@ -28,6 +28,7 @@ type IncomingMsg struct {
 	Content string `json:"content,omitempty"`
 	Items   string `json:"items,omitempty"`
 	Source  string `json:"source,omitempty"`
+	URL     string `json:"url,omitempty"`
 }
 
 // TabToOpen specifies a tab to create in the browser.
@@ -78,6 +79,7 @@ type OutgoingMsg struct {
 	TabInfo *TabInfoPayload `json:"tabInfo,omitempty"`
 	Summary string          `json:"summary,omitempty"`
 	Error   string          `json:"error,omitempty"`
+	Status  string          `json:"status,omitempty"`
 }
 
 // Server manages the WebSocket connection to the extension.

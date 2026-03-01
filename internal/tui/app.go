@@ -91,6 +91,11 @@ type wsSummarizeTabMsg struct {
 	id    string
 	tabID int
 }
+type wsAutoSummarizeMsg struct {
+	id    string
+	tabID int
+	url   string
+}
 
 // --- Command helpers ---
 
@@ -490,6 +495,8 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 				return wsGetTabInfoMsg{id: msg.ID, tabID: msg.TabID}
 			case "summarize-tab":
 				return wsSummarizeTabMsg{id: msg.ID, tabID: msg.TabID}
+			case "auto-summarize":
+				return wsAutoSummarizeMsg{id: msg.ID, tabID: msg.TabID, url: msg.URL}
 			default:
 				if msg.ID != "" && msg.OK != nil {
 					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error, content: msg.Content, items: msg.Items}
@@ -740,6 +747,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					ID:      popupID,
 					Action:  "summarize-result",
 					Summary: msg.summary,
+					Status:  "completed",
 				})
 			}
 		}
@@ -913,6 +921,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				ID:     msg.id,
 				Action: "summarize-result",
 				Error:  "Tab not found",
+			})
+			return m, listenWebSocket(m.server)
+		}
+		if existing, ok := m.tabsView.summarizeJobs[tab.URL]; ok {
+			existing.PopupRequestID = msg.id
+			return m, listenWebSocket(m.server)
+		}
+		job := &SummarizeJob{Tab: tab, PopupRequestID: msg.id}
+		m.tabsView.summarizeJobs[tab.URL] = job
+		if m.mode == ModeLive && m.connected {
+			id, cmd := sendCmdWithID(m.server, server.OutgoingMsg{
+				Action: "get-content",
+				TabID:  tab.BrowserID,
+			})
+			job.ContentID = id
+			return m, tea.Batch(listenWebSocket(m.server), cmd)
+		}
+		return m, tea.Batch(
+			listenWebSocket(m.server),
+			runSummarizeTab(tab, m.summaryDir, m.ollamaModel, m.ollamaHost),
+		)
+
+	case wsAutoSummarizeMsg:
+		// Check if summary already exists on disk
+		tab := m.findTabByBrowserID(msg.tabID)
+		if tab == nil {
+			if msg.url == "" {
+				m.server.Send(server.OutgoingMsg{
+					ID:     msg.id,
+					Action: "summarize-result",
+					Error:  "Tab not found",
+				})
+				return m, listenWebSocket(m.server)
+			}
+			tab = &types.Tab{URL: msg.url, Title: msg.url, BrowserID: msg.tabID}
+		}
+		sumPath := summarize.SummaryPath(m.summaryDir, tab.URL, tab.Title)
+		if raw, err := summarize.ReadSummary(sumPath); err == nil {
+			m.server.Send(server.OutgoingMsg{
+				ID:      msg.id,
+				Action:  "summarize-result",
+				Summary: raw,
+				Status:  "exists",
 			})
 			return m, listenWebSocket(m.server)
 		}
