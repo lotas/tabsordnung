@@ -17,6 +17,7 @@ import (
 	"github.com/lotas/tabsordnung/internal/applog"
 	"github.com/lotas/tabsordnung/internal/classify"
 	"github.com/lotas/tabsordnung/internal/firefox"
+	"github.com/lotas/tabsordnung/internal/bugzilla"
 	"github.com/lotas/tabsordnung/internal/github"
 	"github.com/lotas/tabsordnung/internal/server"
 	"github.com/lotas/tabsordnung/internal/signal"
@@ -463,6 +464,18 @@ func refreshGitHubEntitiesCmd(db *sql.DB) tea.Cmd {
 	}
 }
 
+// refreshBugzillaEntitiesCmd triggers a background Bugzilla REST refresh (respects cooldown).
+func refreshBugzillaEntitiesCmd(db *sql.DB) tea.Cmd {
+	return func() tea.Msg {
+		entities, err := storage.ListBugzillaEntities(db)
+		if err != nil || len(entities) == 0 {
+			return nil
+		}
+		bugzilla.RefreshEntities(db, entities, false)
+		return bugzillaRefreshDoneMsg{}
+	}
+}
+
 func listenWebSocket(srv *server.Server) tea.Cmd {
 	return func() tea.Msg {
 		for {
@@ -775,6 +788,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, extractGitHubFromRecentSignals(m.db, msg.source))
 		cmds = append(cmds, extractBugzillaFromRecentSignals(m.db, msg.source))
 		cmds = append(cmds, refreshGitHubEntitiesCmd(m.db))
+		cmds = append(cmds, refreshBugzillaEntitiesCmd(m.db))
 		return m, tea.Batch(cmds...)
 
 	case signalActionMsg:
@@ -859,6 +873,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			signalPollTick(),
 			classifyTick(),
 			refreshGitHubEntitiesCmd(m.db),
+			refreshBugzillaEntitiesCmd(m.db),
 		)
 
 	case wsDisconnectedMsg:
@@ -1037,6 +1052,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case githubRefreshDoneMsg:
 		v, cmd := m.githubView.Update(msg)
 		m.githubView = v
+		return m, cmd
+
+	case bugzillaRefreshDoneMsg:
+		v, cmd := m.bugzillaView.Update(msg)
+		m.bugzillaView = v
 		return m, cmd
 
 	case bugzillaViewLoadedMsg:

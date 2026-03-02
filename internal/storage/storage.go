@@ -246,6 +246,54 @@ CREATE TABLE bugzilla_entity_events (
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );`,
 	},
+	{
+		Version:     9,
+		Description: "deduplicate signal_seen/tab_seen events and add unique indexes",
+		SQL: `
+-- Delete duplicate github_entity_events with signal_id (keep smallest id per group)
+DELETE FROM github_entity_events WHERE id NOT IN (
+    SELECT MIN(id) FROM github_entity_events
+    WHERE signal_id IS NOT NULL
+    GROUP BY entity_id, event_type, signal_id
+) AND signal_id IS NOT NULL;
+
+-- Delete duplicate github_entity_events with snapshot_id (keep smallest id per group)
+DELETE FROM github_entity_events WHERE id NOT IN (
+    SELECT MIN(id) FROM github_entity_events
+    WHERE snapshot_id IS NOT NULL
+    GROUP BY entity_id, event_type, snapshot_id
+) AND snapshot_id IS NOT NULL;
+
+-- Delete duplicate bugzilla_entity_events with signal_id (keep smallest id per group)
+DELETE FROM bugzilla_entity_events WHERE id NOT IN (
+    SELECT MIN(id) FROM bugzilla_entity_events
+    WHERE signal_id IS NOT NULL
+    GROUP BY entity_id, event_type, signal_id
+) AND signal_id IS NOT NULL;
+
+-- Delete duplicate bugzilla_entity_events with snapshot_id (keep smallest id per group)
+DELETE FROM bugzilla_entity_events WHERE id NOT IN (
+    SELECT MIN(id) FROM bugzilla_entity_events
+    WHERE snapshot_id IS NOT NULL
+    GROUP BY entity_id, event_type, snapshot_id
+) AND snapshot_id IS NOT NULL;
+
+-- Partial unique indexes for github_entity_events
+CREATE UNIQUE INDEX idx_github_events_signal
+    ON github_entity_events(entity_id, event_type, signal_id)
+    WHERE signal_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_github_events_snapshot
+    ON github_entity_events(entity_id, event_type, snapshot_id)
+    WHERE snapshot_id IS NOT NULL;
+
+-- Partial unique indexes for bugzilla_entity_events
+CREATE UNIQUE INDEX idx_bugzilla_events_signal
+    ON bugzilla_entity_events(entity_id, event_type, signal_id)
+    WHERE signal_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_bugzilla_events_snapshot
+    ON bugzilla_entity_events(entity_id, event_type, snapshot_id)
+    WHERE snapshot_id IS NOT NULL;`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.

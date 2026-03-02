@@ -24,7 +24,7 @@ type bugzillaNode struct {
 	IsHeader bool
 	Header   string
 	Entity   *storage.BugzillaEntity
-	Host     string
+	Group    string // status bucket key used for tree expand/collapse
 }
 
 type BugzillaView struct {
@@ -39,17 +39,17 @@ type BugzillaView struct {
 	loading  bool
 	err      error
 
-	treeMode      bool
-	hostExpanded  map[string]bool
-	focusDetail   bool
-	filter        string
-	discoveredIDs []string
+	treeMode       bool
+	groupExpanded  map[string]bool
+	focusDetail    bool
+	filter         string
+	discoveredHosts []string
 }
 
 func NewBugzillaView(db *sql.DB) BugzillaView {
 	return BugzillaView{
-		db:           db,
-		hostExpanded: map[string]bool{},
+		db:            db,
+		groupExpanded: map[string]bool{},
 	}
 }
 
@@ -78,19 +78,34 @@ func (v *BugzillaView) SetSize(w, h int) {
 	v.detail.Height = h
 }
 
+// bugzillaStatusBucket maps a Bugzilla status to a display group.
+func bugzillaStatusBucket(status string) string {
+	switch strings.ToUpper(status) {
+	case "RESOLVED", "VERIFIED", "CLOSED":
+		return "resolved"
+	default:
+		return "open"
+	}
+}
+
+var bugzillaStatusOrder = []string{"open", "resolved"}
+
+var bugzillaStatusLabels = map[string]string{
+	"open":     "Open",
+	"resolved": "Resolved",
+}
+
 func (v *BugzillaView) buildNodes() {
 	v.nodes = nil
 
+	// Track discovered hosts for filter cycling.
 	hostSeen := make(map[string]bool)
 	for _, e := range v.entities {
 		hostSeen[e.Host] = true
 	}
-	v.discoveredIDs = v.discoveredIDs[:0]
+	v.discoveredHosts = v.discoveredHosts[:0]
 	for host := range hostSeen {
-		v.discoveredIDs = append(v.discoveredIDs, host)
-		if _, ok := v.hostExpanded[host]; !ok {
-			v.hostExpanded[host] = true
-		}
+		v.discoveredHosts = append(v.discoveredHosts, host)
 	}
 
 	var filtered []storage.BugzillaEntity
@@ -108,29 +123,35 @@ func (v *BugzillaView) buildNodes() {
 		return
 	}
 
-	hostBuckets := make(map[string][]*storage.BugzillaEntity)
+	// Tree mode: group by status bucket.
+	buckets := make(map[string][]*storage.BugzillaEntity)
 	for i := range filtered {
 		e := &filtered[i]
-		hostBuckets[e.Host] = append(hostBuckets[e.Host], e)
+		bucket := bugzillaStatusBucket(e.Status)
+		buckets[bucket] = append(buckets[bucket], e)
 	}
 
-	for _, host := range v.discoveredIDs {
-		list := hostBuckets[host]
+	for _, key := range bugzillaStatusOrder {
+		list := buckets[key]
 		if len(list) == 0 {
 			continue
 		}
+		if _, ok := v.groupExpanded[key]; !ok {
+			v.groupExpanded[key] = true
+		}
 		icon := "▸"
-		if v.hostExpanded[host] {
+		if v.groupExpanded[key] {
 			icon = "▼"
 		}
+		label := bugzillaStatusLabels[key]
 		v.nodes = append(v.nodes, bugzillaNode{
 			IsHeader: true,
-			Header:   fmt.Sprintf("%s %s (%d)", icon, host, len(list)),
-			Host:     host,
+			Header:   fmt.Sprintf("%s %s (%d)", icon, label, len(list)),
+			Group:    key,
 		})
-		if v.hostExpanded[host] {
+		if v.groupExpanded[key] {
 			for _, e := range list {
-				v.nodes = append(v.nodes, bugzillaNode{Entity: e, Host: host})
+				v.nodes = append(v.nodes, bugzillaNode{Entity: e, Group: key})
 			}
 		}
 	}
@@ -199,7 +220,7 @@ func (v BugzillaView) Update(msg tea.Msg) (BugzillaView, tea.Cmd) {
 			if v.cursor >= 0 && v.cursor < len(v.nodes) {
 				node := v.nodes[v.cursor]
 				if node.IsHeader {
-					v.hostExpanded[node.Host] = false
+					v.groupExpanded[node.Group] = false
 					v.buildNodes()
 				} else {
 					for i := v.cursor - 1; i >= 0; i-- {
@@ -214,8 +235,8 @@ func (v BugzillaView) Update(msg tea.Msg) (BugzillaView, tea.Cmd) {
 		case "l":
 			if v.cursor >= 0 && v.cursor < len(v.nodes) {
 				node := v.nodes[v.cursor]
-				if node.IsHeader && !v.hostExpanded[node.Host] {
-					v.hostExpanded[node.Host] = true
+				if node.IsHeader && !v.groupExpanded[node.Group] {
+					v.groupExpanded[node.Group] = true
 					v.buildNodes()
 				} else if v.cursor < len(v.nodes)-1 {
 					v.cursor++
@@ -226,7 +247,7 @@ func (v BugzillaView) Update(msg tea.Msg) (BugzillaView, tea.Cmd) {
 		case "enter", " ":
 			if v.cursor >= 0 && v.cursor < len(v.nodes) && v.nodes[v.cursor].IsHeader {
 				node := v.nodes[v.cursor]
-				v.hostExpanded[node.Host] = !v.hostExpanded[node.Host]
+				v.groupExpanded[node.Group] = !v.groupExpanded[node.Group]
 				v.buildNodes()
 			} else if v.selectedEntity() != nil {
 				v.focusDetail = true
@@ -238,16 +259,16 @@ func (v BugzillaView) Update(msg tea.Msg) (BugzillaView, tea.Cmd) {
 			v.buildNodes()
 		case "f":
 			// Cycle filter through known hosts + none.
-			if len(v.discoveredIDs) == 0 {
+			if len(v.discoveredHosts) == 0 {
 				v.filter = ""
 			} else if v.filter == "" {
-				v.filter = v.discoveredIDs[0]
+				v.filter = v.discoveredHosts[0]
 			} else {
 				next := ""
-				for i, host := range v.discoveredIDs {
+				for i, host := range v.discoveredHosts {
 					if host == v.filter {
-						if i+1 < len(v.discoveredIDs) {
-							next = v.discoveredIDs[i+1]
+						if i+1 < len(v.discoveredHosts) {
+							next = v.discoveredHosts[i+1]
 						}
 						break
 					}
@@ -331,25 +352,30 @@ func (v BugzillaView) ViewList() string {
 			if v.treeMode {
 				indent = "    "
 			}
-			ref := fmt.Sprintf("%s#%d", e.Host, e.BugID)
+			ref := fmt.Sprintf("#%d", e.BugID)
+			// In tree mode, status is implied by the group header.
+			statusStr := ""
+			statusLen := 0
+			if !v.treeMode && e.Status != "" {
+				statusTag := " [" + e.Status + "]"
+				statusLen = len(statusTag)
+				switch e.Status {
+				case "RESOLVED", "VERIFIED", "CLOSED":
+					statusStr = " " + dimStyle.Render("["+e.Status+"]")
+				default:
+					statusStr = " " + idStyle.Render("["+e.Status+"]")
+				}
+			}
 			titleStr := ""
 			if e.Title != "" {
-				maxTitle := treeWidth - len(indent) - 2 - len(ref) - 4
+				// indent(2-4) + "● "(2) + ref + "  " + title + status must fit treeWidth
+				maxTitle := treeWidth - len(indent) - 2 - len(ref) - 2 - statusLen
 				t := e.Title
 				if maxTitle > 3 && len(t) > maxTitle {
 					t = t[:maxTitle-1] + "…"
 				}
 				if maxTitle > 0 {
 					titleStr = "  " + t
-				}
-			}
-			statusStr := ""
-			if e.Status != "" {
-				switch e.Status {
-				case "RESOLVED", "VERIFIED", "CLOSED":
-					statusStr = " " + dimStyle.Render("["+e.Status+"]")
-				default:
-					statusStr = " " + idStyle.Render("["+e.Status+"]")
 				}
 			}
 			row := indent + idStyle.Render("●") + " " + idStyle.Render(ref) + titleStr + statusStr

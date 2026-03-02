@@ -7,11 +7,154 @@ import (
 	"time"
 )
 
+func TestExtractBugTitleFromText(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"bracket format", "[Bug 1971046] Intermittent crash in widget", "Intermittent crash in widget"},
+		{"with daemon prefix", "bugzilla-daemon — [Bug 1971046] Intermittent crash in widget", "Intermittent crash in widget"},
+		{"case insensitive", "[bug 12345] Fix rendering", "Fix rendering"},
+		{"no match plain text", "Bug 12345 from dev@example.com", ""},
+		{"no match empty", "", ""},
+		{"no match no brackets", "just some text", ""},
+		{"title with extra spaces", "[Bug 99999]   padded title  ", "padded title"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractBugTitleFromText(tc.input)
+			if got != tc.want {
+				t.Errorf("extractBugTitleFromText(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractBugzillaRefFromText(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  *bugzillaRef
+	}{
+		{"bracket format", "[Bug 1971046] Intermittent crash", &bugzillaRef{"bugzilla.mozilla.org", 1971046}},
+		{"plain format", "Bug 1971046 from dev@example.com", &bugzillaRef{"bugzilla.mozilla.org", 1971046}},
+		{"lowercase", "bug 12345 is fixed", &bugzillaRef{"bugzilla.mozilla.org", 12345}},
+		{"mixed case", "BUG 99999 updated", &bugzillaRef{"bugzilla.mozilla.org", 99999}},
+		{"comment format", "Comment # 33 on Bug 1971046 from...", &bugzillaRef{"bugzilla.mozilla.org", 1971046}},
+		{"no match", "no bugs here", nil},
+		{"empty", "", nil},
+		{"just number", "12345", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractBugzillaRefFromText(tc.input)
+			if tc.want == nil {
+				if got != nil {
+					t.Errorf("expected nil, got %+v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("expected %+v, got nil", tc.want)
+			}
+			if got.host != tc.want.host || got.bugID != tc.want.bugID {
+				t.Errorf("got {%s, %d}, want {%s, %d}", got.host, got.bugID, tc.want.host, tc.want.bugID)
+			}
+		})
+	}
+}
+
+func TestExtractBugzillaFromSignalRecord_EmailNotification(t *testing.T) {
+	// Simulates a bugzilla-daemon email notification with no URL.
+	sig := SignalRecord{
+		Source:  "gmail",
+		Title:   "bugzilla-daemon — [Bug 1971046] Intermittent crash in widget",
+		Snippet: "Comment # 33 on Bug 1971046 from dev@example.com",
+	}
+	ref := extractBugzillaFromSignalRecord(sig)
+	if ref == nil {
+		t.Fatal("expected bugzilla ref, got nil")
+	}
+	if ref.host != "bugzilla.mozilla.org" || ref.bugID != 1971046 {
+		t.Errorf("got {%s, %d}, want {bugzilla.mozilla.org, 1971046}", ref.host, ref.bugID)
+	}
+}
+
+func TestExtractBugzillaFromSnapshot_EmailTab(t *testing.T) {
+	db := testDB(t)
+
+	// Gmail tab with bug ID in title but non-Bugzilla URL.
+	_, err := CreateSnapshot(db, "default", nil, []SnapshotTab{
+		{URL: "https://mail.google.com/mail/u/0/#inbox/abc123",
+			Title: "[Bug 1971046] Intermittent crash in widget"},
+	}, "")
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	var snapID int64
+	db.QueryRow("SELECT id FROM snapshots WHERE profile = 'default' AND rev = 1").Scan(&snapID)
+
+	count, err := ExtractBugzillaFromSnapshot(db, snapID)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 entity, got %d", count)
+	}
+
+	entities, _ := ListBugzillaEntities(db)
+	if len(entities) != 1 {
+		t.Fatalf("want 1 entity, got %d", len(entities))
+	}
+	if entities[0].BugID != 1971046 {
+		t.Errorf("BugID = %d, want 1971046", entities[0].BugID)
+	}
+	if entities[0].Host != "bugzilla.mozilla.org" {
+		t.Errorf("Host = %q, want bugzilla.mozilla.org", entities[0].Host)
+	}
+	if entities[0].Title != "Intermittent crash in widget" {
+		t.Errorf("Title = %q, want %q", entities[0].Title, "Intermittent crash in widget")
+	}
+}
+
+func TestExtractBugzillaFromSignals_EmailNotification(t *testing.T) {
+	db := testDB(t)
+
+	now := time.Now()
+	// Signal with no Bugzilla URL, only text reference.
+	InsertSignal(db, SignalRecord{
+		Source:     "gmail",
+		Title:      "bugzilla-daemon — [Bug 1971046] Intermittent crash",
+		Snippet:    "Comment # 33 on Bug 1971046 from dev@example.com",
+		SourceTS:   "1:00 PM",
+		CapturedAt: now,
+	})
+
+	signals, _ := ListSignals(db, "", false)
+	count, err := ExtractBugzillaFromSignals(db, signals)
+	if err != nil {
+		t.Fatalf("ExtractBugzillaFromSignals: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1, got %d", count)
+	}
+
+	entities, _ := ListBugzillaEntities(db)
+	if len(entities) != 1 || entities[0].BugID != 1971046 {
+		t.Fatalf("unexpected entities: %+v", entities)
+	}
+	if entities[0].Title != "Intermittent crash" {
+		t.Errorf("Title = %q, want %q", entities[0].Title, "Intermittent crash")
+	}
+}
+
 func TestCleanBugzillaTabTitle(t *testing.T) {
 	cases := []struct{ input, want string }{
 		{"Bug 1900001 \u2013 Crash on startup \u2013 Bugzilla", "Crash on startup"},
 		{"Bug 12345 - Fix rendering issue - Bugzilla", "Fix rendering issue"},
 		{"Bug 1 \u2013 Short \u2013 Bugzilla", "Short"},
+		{"[Bug 1971046] Intermittent crash in widget", "Intermittent crash in widget"},
 		{"Some random page title", "Some random page title"},
 		{"", ""},
 	}

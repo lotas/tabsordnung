@@ -92,7 +92,7 @@ func UpsertGitHubEntity(db *sql.DB, owner, repo string, number int, kind, source
 // RecordGitHubEvent inserts a timeline event for a GitHub entity.
 func RecordGitHubEvent(db *sql.DB, entityID int64, eventType string, signalID *int64, snapshotID *int64, detail string) error {
 	_, err := db.Exec(
-		`INSERT INTO github_entity_events (entity_id, event_type, signal_id, snapshot_id, detail)
+		`INSERT OR IGNORE INTO github_entity_events (entity_id, event_type, signal_id, snapshot_id, detail)
 		 VALUES (?, ?, ?, ?, ?)`,
 		entityID, eventType, signalID, snapshotID, detail,
 	)

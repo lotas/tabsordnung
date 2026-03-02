@@ -49,6 +49,8 @@ type bugzillaRef struct {
 
 var (
 	urlCandidatePattern = regexp.MustCompile(`https?://[^\s<>()"']+`)
+	bugIDTextPattern    = regexp.MustCompile(`(?i)\bBug\s+(\d+)\b`)
+	bugTitlePattern     = regexp.MustCompile(`(?i)\[Bug\s+\d+\]\s*(.+)`)
 )
 
 // UpsertBugzillaEntity looks up a bug by host+bug_id. If it does not exist,
@@ -84,7 +86,7 @@ func UpsertBugzillaEntity(db *sql.DB, host string, bugID int, source string) (in
 // RecordBugzillaEvent inserts a timeline event for a Bugzilla entity.
 func RecordBugzillaEvent(db *sql.DB, entityID int64, eventType string, signalID *int64, snapshotID *int64, detail string) error {
 	_, err := db.Exec(
-		`INSERT INTO bugzilla_entity_events (entity_id, event_type, signal_id, snapshot_id, detail)
+		`INSERT OR IGNORE INTO bugzilla_entity_events (entity_id, event_type, signal_id, snapshot_id, detail)
 		 VALUES (?, ?, ?, ?, ?)`,
 		entityID, eventType, signalID, snapshotID, detail,
 	)
@@ -140,6 +142,16 @@ func UpdateBugzillaEntityStatus(db *sql.DB, id int64, u BugzillaStatusUpdate) er
 	return nil
 }
 
+// extractBugTitleFromText extracts a bug title from text containing "[Bug NNNN] title".
+// Returns the title portion after the bracket, trimmed, or "" if no match.
+func extractBugTitleFromText(text string) string {
+	m := bugTitlePattern.FindStringSubmatch(text)
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
+}
+
 // CleanBugzillaTabTitle extracts the bug summary from a Firefox tab title.
 // Handles "Bug 12345 – Summary – Bugzilla" and "Bug 12345 - Summary - Bugzilla".
 func CleanBugzillaTabTitle(title string) string {
@@ -154,6 +166,9 @@ func CleanBugzillaTabTitle(title string) string {
 				return summary
 			}
 		}
+	}
+	if t := extractBugTitleFromText(title); t != "" {
+		return t
 	}
 	return title
 }
@@ -325,6 +340,10 @@ func ExtractBugzillaFromSnapshot(db *sql.DB, snapshotID int64) (int, error) {
 		}
 		ref := extractBugzillaFromURL(tabURL)
 		if ref == nil {
+			// Fall back to text-based extraction from tab title (e.g. Gmail tabs showing "[Bug NNNN]").
+			ref = extractBugzillaRefFromText(tabTitle)
+		}
+		if ref == nil {
 			continue
 		}
 		id, isNew, err := UpsertBugzillaEntity(db, ref.host, ref.bugID, "tab")
@@ -351,9 +370,17 @@ func ExtractBugzillaFromSignals(db *sql.DB, signals []SignalRecord) (int, error)
 		if ref == nil {
 			continue
 		}
-		id, _, err := UpsertBugzillaEntity(db, ref.host, ref.bugID, "signal")
+		id, isNew, err := UpsertBugzillaEntity(db, ref.host, ref.bugID, "signal")
 		if err != nil {
 			continue
+		}
+		if isNew {
+			for _, text := range []string{sig.Title, sig.Snippet, sig.Preview} {
+				if title := extractBugTitleFromText(text); title != "" {
+					db.Exec(`UPDATE bugzilla_entities SET title=? WHERE id=? AND title=''`, title, id)
+					break
+				}
+			}
 		}
 		sigID := sig.ID
 		_ = RecordBugzillaEvent(db, id, "signal_seen", &sigID, nil, "")
@@ -384,6 +411,9 @@ func BackfillBugzillaEntities(db *sql.DB) (int, error) {
 			continue
 		}
 		ref := extractBugzillaFromURL(tabURL)
+		if ref == nil {
+			ref = extractBugzillaRefFromText(tabTitle)
+		}
 		if ref == nil {
 			continue
 		}
@@ -423,6 +453,12 @@ func BackfillBugzillaEntities(db *sql.DB) (int, error) {
 		}
 		if isNew {
 			db.Exec("UPDATE bugzilla_entities SET first_seen_at = ? WHERE id = ?", sig.CapturedAt, id)
+			for _, text := range []string{sig.Title, sig.Snippet, sig.Preview} {
+				if title := extractBugTitleFromText(text); title != "" {
+					db.Exec(`UPDATE bugzilla_entities SET title=? WHERE id=? AND title=''`, title, id)
+					break
+				}
+			}
 		}
 		if !seen[key] {
 			sigID := sig.ID
@@ -440,6 +476,12 @@ func extractBugzillaFromSignalRecord(sig SignalRecord) *bugzillaRef {
 			return ref
 		}
 	}
+	// Fall back to text-based "Bug NNNN" extraction (e.g. bugzilla-daemon emails).
+	for _, text := range []string{sig.Snippet, sig.Preview, sig.Title} {
+		if ref := extractBugzillaRefFromText(text); ref != nil {
+			return ref
+		}
+	}
 	return nil
 }
 
@@ -454,6 +496,24 @@ func extractBugzillaURLFromText(text string) *bugzillaRef {
 		}
 	}
 	return nil
+}
+
+// extractBugzillaRefFromText finds "Bug NNNN" patterns in text (e.g. email
+// notifications from bugzilla-daemon) and returns a ref with default host
+// bugzilla.mozilla.org.
+func extractBugzillaRefFromText(text string) *bugzillaRef {
+	if text == "" {
+		return nil
+	}
+	m := bugIDTextPattern.FindStringSubmatch(text)
+	if m == nil {
+		return nil
+	}
+	bugID, ok := parsePositiveInt(m[1])
+	if !ok {
+		return nil
+	}
+	return &bugzillaRef{host: "bugzilla.mozilla.org", bugID: bugID}
 }
 
 func extractBugzillaFromURL(rawURL string) *bugzillaRef {
