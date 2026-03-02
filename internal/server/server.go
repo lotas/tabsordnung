@@ -25,10 +25,12 @@ type IncomingMsg struct {
 	OK      *bool  `json:"ok,omitempty"`
 	Error   string `json:"error,omitempty"`
 	GroupID int    `json:"groupId,omitempty"`
-	Content string `json:"content,omitempty"`
-	Items   string `json:"items,omitempty"`
-	Source  string `json:"source,omitempty"`
-	URL     string `json:"url,omitempty"`
+	Content   string `json:"content,omitempty"`
+	Items     string `json:"items,omitempty"`
+	Source    string `json:"source,omitempty"`
+	URL       string `json:"url,omitempty"`
+	ChannelID string `json:"channelId,omitempty"`
+	ThreadTS  string `json:"threadTs,omitempty"`
 }
 
 // TabToOpen specifies a tab to create in the browser.

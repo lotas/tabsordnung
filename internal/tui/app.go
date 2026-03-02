@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -97,6 +98,33 @@ type wsAutoSummarizeMsg struct {
 	tabID int
 	url   string
 }
+type wsGetThreadSummaryMsg struct {
+	id        string
+	channelID string
+	threadTS  string
+}
+type wsSummarizeThreadMsg struct {
+	id        string
+	tabID     int
+	channelID string
+	threadTS  string
+}
+type summarizeThreadCompleteMsg struct {
+	channelID    string
+	threadTS     string
+	summary      string
+	messageCount int
+	err          error
+}
+
+// ThreadSummarizeJob tracks a single in-flight thread summarization.
+type ThreadSummarizeJob struct {
+	TabID          int
+	ChannelID      string
+	ThreadTS       string
+	ContentID      string
+	PopupRequestID string
+}
 
 // --- Command helpers ---
 
@@ -181,6 +209,9 @@ type Model struct {
 	bugzillaView  BugzillaView
 	snapshotsView SnapshotsView
 
+	// Thread summarization
+	threadSummarizeJobs map[string]*ThreadSummarizeJob // key: channelID/threadTS
+
 	// Debounced rebuild
 	rebuildDirty     bool
 	rebuildScheduled bool
@@ -197,6 +228,7 @@ func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *serve
 		ollamaHost:  ollamaHost,
 		db:          db,
 	}
+	m.threadSummarizeJobs = make(map[string]*ThreadSummarizeJob)
 	m.tabsView = NewTabsView(srv, db, summaryDir, ollamaModel, ollamaHost)
 	m.tabsView.staleDays = staleDays
 	m.signalsView = NewSignalsView(db)
@@ -319,6 +351,32 @@ func runSummarizeWithContent(tab *types.Tab, content, outDir, model, host string
 			return summarizeCompleteMsg{url: tab.URL, err: err}
 		}
 		return summarizeCompleteMsg{url: tab.URL, summary: sum}
+	}
+}
+
+// threadMsg is a single scraped message from a Slack thread.
+type threadMsg struct {
+	Author    string `json:"author"`
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp"`
+}
+
+func runSummarizeThread(items, channelID, threadTS, model, host string) tea.Cmd {
+	return func() tea.Msg {
+		var msgs []threadMsg
+		if err := json.Unmarshal([]byte(items), &msgs); err != nil {
+			return summarizeThreadCompleteMsg{channelID: channelID, threadTS: threadTS, err: fmt.Errorf("parse thread messages: %w", err)}
+		}
+		var b strings.Builder
+		for _, m := range msgs {
+			fmt.Fprintf(&b, "%s: %s\n", m.Author, m.Text)
+		}
+		ctx := context.Background()
+		sum, err := summarize.OllamaThreadSummarize(ctx, model, host, b.String())
+		if err != nil {
+			return summarizeThreadCompleteMsg{channelID: channelID, threadTS: threadTS, err: err}
+		}
+		return summarizeThreadCompleteMsg{channelID: channelID, threadTS: threadTS, summary: sum, messageCount: len(msgs)}
 	}
 }
 
@@ -510,6 +568,10 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 				return wsSummarizeTabMsg{id: msg.ID, tabID: msg.TabID}
 			case "auto-summarize":
 				return wsAutoSummarizeMsg{id: msg.ID, tabID: msg.TabID, url: msg.URL}
+			case "get-thread-summary":
+				return wsGetThreadSummaryMsg{id: msg.ID, channelID: msg.ChannelID, threadTS: msg.ThreadTS}
+			case "summarize-thread":
+				return wsSummarizeThreadMsg{id: msg.ID, tabID: msg.TabID, channelID: msg.ChannelID, threadTS: msg.ThreadTS}
 			default:
 				if msg.ID != "" && msg.OK != nil {
 					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error, content: msg.Content, items: msg.Items}
@@ -1001,6 +1063,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			runSummarizeTab(tab, m.summaryDir, m.ollamaModel, m.ollamaHost),
 		)
 
+	case wsGetThreadSummaryMsg:
+		summary := ""
+		if m.db != nil {
+			if cached, err := storage.GetSlackThreadSummary(m.db, msg.channelID, msg.threadTS); err == nil && cached != nil {
+				summary = cached.Summary
+			}
+		}
+		m.server.Send(server.OutgoingMsg{
+			ID:      msg.id,
+			Action:  "thread-summary-result",
+			Summary: summary,
+		})
+		return m, listenWebSocket(m.server)
+
+	case wsSummarizeThreadMsg:
+		key := msg.channelID + "/" + msg.threadTS
+		if existing, ok := m.threadSummarizeJobs[key]; ok {
+			existing.PopupRequestID = msg.id
+			return m, listenWebSocket(m.server)
+		}
+		job := &ThreadSummarizeJob{
+			TabID:          msg.tabID,
+			ChannelID:      msg.channelID,
+			ThreadTS:       msg.threadTS,
+			PopupRequestID: msg.id,
+		}
+		m.threadSummarizeJobs[key] = job
+		id, cmd := sendCmdWithID(m.server, server.OutgoingMsg{
+			Action: "scrape-thread",
+			TabID:  msg.tabID,
+		})
+		job.ContentID = id
+		return m, tea.Batch(listenWebSocket(m.server), cmd)
+
+	case summarizeThreadCompleteMsg:
+		key := msg.channelID + "/" + msg.threadTS
+		job := m.threadSummarizeJobs[key]
+		popupID := ""
+		if job != nil {
+			popupID = job.PopupRequestID
+		}
+		delete(m.threadSummarizeJobs, key)
+		if msg.err != nil {
+			if popupID != "" {
+				m.server.Send(server.OutgoingMsg{
+					ID:     popupID,
+					Action: "thread-summary-result",
+					Error:  msg.err.Error(),
+				})
+			}
+		} else {
+			if m.db != nil {
+				storage.UpsertSlackThreadSummary(m.db, msg.channelID, msg.threadTS, msg.summary, msg.messageCount)
+			}
+			if popupID != "" {
+				m.server.Send(server.OutgoingMsg{
+					ID:      popupID,
+					Action:  "thread-summary-result",
+					Summary: msg.summary,
+					Status:  "completed",
+				})
+			}
+		}
+		return m, nil
+
 	case wsCmdResponseMsg:
 		applog.Info("tui.cmdResponse", "id", msg.id, "ok", msg.ok)
 		if m.tabsView.signalActive != nil && m.tabsView.signalActive.ContentID == msg.id {
@@ -1039,6 +1166,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(
 					listenWebSocket(m.server),
 					runSummarizeTab(tab, m.summaryDir, m.ollamaModel, m.ollamaHost),
+				)
+			}
+		}
+		for _, job := range m.threadSummarizeJobs {
+			if job.ContentID != "" && job.ContentID == msg.id {
+				job.ContentID = ""
+				if !msg.ok {
+					return m, tea.Batch(
+						listenWebSocket(m.server),
+						func() tea.Msg {
+							return summarizeThreadCompleteMsg{
+								channelID: job.ChannelID,
+								threadTS:  job.ThreadTS,
+								err:       fmt.Errorf("scrape failed: %s", msg.error),
+							}
+						},
+					)
+				}
+				return m, tea.Batch(
+					listenWebSocket(m.server),
+					runSummarizeThread(msg.items, job.ChannelID, job.ThreadTS, m.ollamaModel, m.ollamaHost),
 				)
 			}
 		}

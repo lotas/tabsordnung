@@ -15,6 +15,11 @@ async function init() {
   }
 
   renderTabInfo(response);
+
+  // Detect Slack thread if on a Slack tab
+  if (response.url && response.url.includes("slack.com")) {
+    detectThread();
+  }
 }
 
 function showDisconnected() {
@@ -131,6 +136,72 @@ async function summarizeTab() {
     $("#summary-error").textContent = errMsg;
     $("#summary-error").classList.remove("hidden");
     btn.classList.remove("hidden");
+  }
+}
+
+let currentThread = null;
+
+async function detectThread() {
+  let response;
+  try {
+    response = await browser.runtime.sendMessage({ action: "detect-thread" });
+  } catch (e) {
+    return;
+  }
+
+  if (!response || !response.thread) return;
+
+  currentThread = response.thread;
+  $("#thread-section").classList.remove("hidden");
+
+  if (response.thread.summary) {
+    $("#thread-summary-content").innerHTML = marked.parse(response.thread.summary);
+    $("#thread-summary-content").classList.remove("hidden");
+    $("#resummarize-thread-btn").classList.remove("hidden");
+    $("#resummarize-thread-btn").addEventListener("click", () => summarizeThread());
+  } else {
+    $("#thread-summary-none").classList.remove("hidden");
+    $("#summarize-thread-btn").classList.remove("hidden");
+    $("#summarize-thread-btn").addEventListener("click", () => summarizeThread());
+  }
+}
+
+async function summarizeThread() {
+  if (!currentThread) return;
+
+  $("#summarize-thread-btn").classList.add("hidden");
+  $("#resummarize-thread-btn").classList.add("hidden");
+  $("#thread-summary-none").classList.add("hidden");
+  $("#thread-summary-error").classList.add("hidden");
+  $("#thread-summary-content").classList.add("hidden");
+  $("#thread-summary-spinner").classList.remove("hidden");
+
+  let response;
+  try {
+    response = await browser.runtime.sendMessage({
+      action: "summarize-thread",
+      channelId: currentThread.channelId,
+      threadTs: currentThread.threadTs,
+    });
+  } catch (e) {
+    $("#thread-summary-spinner").classList.add("hidden");
+    $("#thread-summary-error").textContent = "Failed: " + e.message;
+    $("#thread-summary-error").classList.remove("hidden");
+    $("#summarize-thread-btn").classList.remove("hidden");
+    return;
+  }
+
+  $("#thread-summary-spinner").classList.add("hidden");
+
+  if (response && response.summary) {
+    $("#thread-summary-content").innerHTML = marked.parse(response.summary);
+    $("#thread-summary-content").classList.remove("hidden");
+    $("#resummarize-thread-btn").classList.remove("hidden");
+  } else {
+    const errMsg = (response && response.error) || "Thread summarization failed";
+    $("#thread-summary-error").textContent = errMsg;
+    $("#thread-summary-error").classList.remove("hidden");
+    $("#summarize-thread-btn").classList.remove("hidden");
   }
 }
 

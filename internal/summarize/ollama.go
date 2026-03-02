@@ -26,6 +26,53 @@ type ollamaResponse struct {
 	Response string `json:"response"`
 }
 
+const threadPromptTemplate = `Summarize this Slack conversation thread. Identify the main topic, key decisions or conclusions, and any open questions or action items. Be concise.
+
+---
+
+%s`
+
+// OllamaThreadSummarize sends thread messages to Ollama and returns a conversation summary.
+func OllamaThreadSummarize(ctx context.Context, model, host, text string) (string, error) {
+	if len(text) > maxTextLen {
+		text = text[:maxTextLen]
+	}
+
+	reqBody := ollamaRequest{
+		Model:  model,
+		Prompt: fmt.Sprintf(threadPromptTemplate, text),
+		Stream: false,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/api/generate", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama returned HTTP %d", resp.StatusCode)
+	}
+
+	var result ollamaResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode ollama response: %w", err)
+	}
+
+	return result.Response, nil
+}
+
 // OllamaSummarize sends text to an Ollama instance and returns the summary.
 func OllamaSummarize(ctx context.Context, model, host, text string) (string, error) {
 	if len(text) > maxTextLen {

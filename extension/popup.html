@@ -40,6 +40,21 @@
       <div class="section-header">Signals <span id="signal-source-label"></span></div>
       <ul id="signals-list"></ul>
     </div>
+
+    <div id="thread-section" class="hidden">
+      <div class="section-header summary-header">
+        Thread Summary
+        <button id="resummarize-thread-btn" class="summarize-btn-small hidden">Re-summarize</button>
+      </div>
+      <div id="thread-summary-content" class="hidden"></div>
+      <div id="thread-summary-none" class="hint hidden">No thread summary yet.</div>
+      <div id="thread-summary-spinner" class="hidden">
+        <div class="spinner small"></div>
+        <span>Summarizing thread...</span>
+      </div>
+      <div id="thread-summary-error" class="error hidden"></div>
+      <button id="summarize-thread-btn" class="summarize-btn-small hidden">Summarize Thread</button>
+    </div>
   </div>
 
   <script src="marked.min.js"></script>

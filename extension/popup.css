@@ -281,3 +281,47 @@ button:disabled {
   text-transform: none;
   color: #4a90d9;
 }
+
+/* Thread summary */
+#thread-summary-content {
+  font-size: 15px;
+  line-height: 1.5;
+  color: #ccc;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+#thread-summary-content h1,
+#thread-summary-content h2,
+#thread-summary-content h3 {
+  color: #fff;
+  margin: 8px 0 4px;
+  font-size: 15px;
+}
+
+#thread-summary-content p {
+  margin: 4px 0;
+}
+
+#thread-summary-content ul,
+#thread-summary-content ol {
+  padding-left: 20px;
+  margin: 4px 0;
+}
+
+#thread-summary-content code {
+  background: #2a2a3a;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 13px;
+}
+
+#thread-summary-content a {
+  color: #4a90d9;
+}
+
+#thread-summary-spinner {
+  font-size: 15px;
+  color: #aaa;
+  padding: 6px 0;
+}

@@ -294,6 +294,20 @@ CREATE UNIQUE INDEX idx_bugzilla_events_snapshot
     ON bugzilla_entity_events(entity_id, event_type, snapshot_id)
     WHERE snapshot_id IS NOT NULL;`,
 	},
+	{
+		Version:     10,
+		Description: "create slack_thread_summaries table",
+		SQL: `
+CREATE TABLE slack_thread_summaries (
+    id              INTEGER PRIMARY KEY,
+    channel_id      TEXT NOT NULL,
+    thread_ts       TEXT NOT NULL,
+    summary         TEXT NOT NULL DEFAULT '',
+    message_count   INTEGER NOT NULL DEFAULT 0,
+    summarized_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(channel_id, thread_ts)
+);`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.

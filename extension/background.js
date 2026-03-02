@@ -299,6 +299,43 @@ async function handleCommand(msg) {
         send({ id: msg.id, ok: true, clicked });
         return;
       }
+      case "scrape-thread": {
+        const threadResults = await browser.scripting.executeScript({
+          target: { tabId: msg.tabId },
+          func: () => {
+            const threadPane = document.querySelector('[data-qa="threads_flexpane"]') ||
+                               document.querySelector('.p-threads_flexpane');
+            if (!threadPane) return null;
+
+            const messageEls = threadPane.querySelectorAll('[data-qa="virtual-list-item"], .c-virtual_list__item');
+            const messages = [];
+            messageEls.forEach(el => {
+              const authorEl = el.querySelector('[data-qa="message_sender_name"]') ||
+                               el.querySelector('.c-message__sender_name');
+              const textEl = el.querySelector('[data-qa="message-text"]') ||
+                             el.querySelector('.p-rich_text_block');
+              const timeEl = el.querySelector('time');
+
+              const author = authorEl?.textContent?.trim() || "";
+              const text = textEl?.textContent?.trim() || "";
+              const timestamp = timeEl?.getAttribute('datetime') || "";
+
+              if (text) {
+                messages.push({ author, text, timestamp });
+              }
+            });
+            return messages.length > 0 ? messages : null;
+          },
+        });
+
+        const threadItems = threadResults?.[0]?.result;
+        if (!threadItems) {
+          send({ id: msg.id, ok: false, error: "Thread pane not found or empty" });
+          return;
+        }
+        send({ id: msg.id, ok: true, items: JSON.stringify(threadItems) });
+        return;
+      }
       case "scrape-activity": {
         const scrapers = {
           gmail: () => {
@@ -394,6 +431,12 @@ browser.runtime.onMessage.addListener((message, _sender) => {
   if (message.action === "summarize-tab") {
     return handleSummarizeTab();
   }
+  if (message.action === "detect-thread") {
+    return handleDetectThread();
+  }
+  if (message.action === "summarize-thread") {
+    return handleSummarizeThread(message.channelId, message.threadTs);
+  }
   return false;
 });
 
@@ -443,6 +486,121 @@ async function handleSummarizeTab() {
       pendingPopupRequests.delete(id);
       resolve({ error: "Summarization timed out" });
     }, 120000); // 2 min for summarization
+
+    pendingPopupRequests.set(id, {
+      resolve: (msg) => {
+        clearTimeout(timeout);
+        if (msg.error) {
+          resolve({ error: msg.error });
+        } else {
+          resolve({ summary: msg.summary });
+        }
+      },
+    });
+  });
+}
+
+// --- Thread detection & summarization ---
+
+async function handleDetectThread() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    return { thread: null };
+  }
+
+  const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab || !activeTab.url || !activeTab.url.includes("slack.com")) {
+    return { thread: null };
+  }
+
+  // Inject content script to detect thread pane
+  let results;
+  try {
+    results = await browser.scripting.executeScript({
+      target: { tabId: activeTab.id },
+      func: () => {
+        const threadPane = document.querySelector('[data-qa="threads_flexpane"]') ||
+                           document.querySelector('.p-threads_flexpane');
+        if (!threadPane) return null;
+
+        // Extract channel ID from URL path: /client/TEAM/CHANNEL/...
+        const pathParts = window.location.pathname.split('/');
+        let channelId = '';
+        // Find the channel ID (starts with C or D, after /client/TEAM/)
+        for (let i = 0; i < pathParts.length; i++) {
+          if (pathParts[i] === 'client' && i + 2 < pathParts.length) {
+            channelId = pathParts[i + 2];
+            break;
+          }
+        }
+        if (!channelId) return null;
+
+        // Extract thread timestamp from the root message
+        const rootMsg = threadPane.querySelector('[data-ts]');
+        const threadTs = rootMsg?.getAttribute('data-ts') || '';
+        if (!threadTs) {
+          // Fallback: try to find timestamp in a permalink or time element
+          const timeEl = threadPane.querySelector('a[data-stringify-type="timestamp"], time[datetime]');
+          if (!timeEl) return null;
+          const ts = timeEl.getAttribute('data-ts') || timeEl.getAttribute('datetime') || '';
+          if (!ts) return null;
+          return { channelId, threadTs: ts };
+        }
+
+        return { channelId, threadTs };
+      },
+    });
+  } catch (e) {
+    return { thread: null };
+  }
+
+  const threadInfo = results?.[0]?.result;
+  if (!threadInfo) {
+    return { thread: null };
+  }
+
+  // Check cache via TUI
+  const id = nextPopupCmdID();
+  send({ type: "get-thread-summary", id, channelId: threadInfo.channelId, threadTs: threadInfo.threadTs });
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingPopupRequests.delete(id);
+      resolve({ thread: { channelId: threadInfo.channelId, threadTs: threadInfo.threadTs, summary: "" } });
+    }, 10000);
+
+    pendingPopupRequests.set(id, {
+      resolve: (msg) => {
+        clearTimeout(timeout);
+        resolve({
+          thread: {
+            channelId: threadInfo.channelId,
+            threadTs: threadInfo.threadTs,
+            summary: msg.summary || "",
+          },
+        });
+      },
+    });
+  });
+}
+
+async function handleSummarizeThread(channelId, threadTs) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    return { error: "Not connected" };
+  }
+
+  const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab) {
+    return { error: "No active tab" };
+  }
+
+  const id = nextPopupCmdID();
+  send({ type: "summarize-thread", id, tabId: activeTab.id, channelId, threadTs });
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingPopupRequests.delete(id);
+      resolve({ error: "Thread summarization timed out" });
+    }, 120000);
 
     pendingPopupRequests.set(id, {
       resolve: (msg) => {
