@@ -30,9 +30,12 @@ tabsordnung                              # TUI (default)
 tabsordnung export                       # Export tabs to stdout or file
 tabsordnung signals <command>            # List/complete/reopen activity signals
 tabsordnung github [list]                # List tracked GitHub entities
+tabsordnung bugzilla [list]              # List tracked Bugzilla issues
 tabsordnung profiles                     # List Firefox profiles
 tabsordnung snapshot <command>           # Manage tab snapshots
 tabsordnung triage                       # Classify GitHub tabs into groups
+tabsordnung summarize                    # Summarize tabs via Ollama
+tabsordnung rules view|edit              # Manage urgency classification rules
 tabsordnung help                         # Show help
 ```
 
@@ -100,6 +103,41 @@ tabsordnung snapshot delete <name> [--yes]
 
 `restore` requires the Firefox extension running in live mode.
 
+### Bugzilla
+
+List tracked Bugzilla issues discovered from tabs. Shows bug summary, status, resolution, and assignment.
+
+```
+tabsordnung bugzilla
+tabsordnung bugzilla list [--json] [--host domain]
+```
+
+### Summarize
+
+Summarize tab content using a local Ollama LLM. Processes tabs in a named group, fetches readable page content, and saves markdown summaries organized by domain.
+
+```
+tabsordnung summarize [--profile name] [--model name] [--out-dir path] [--group name]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--profile` | | Firefox profile name |
+| `--model` | `llama3.2` | Ollama model name (env: `TABSORDNUNG_MODEL`) |
+| `--out-dir` | `~/.local/share/tabsordnung/summaries/` | Output directory for summary files |
+| `--group` | `Summarize This` | Tab group name to summarize |
+
+### Rules
+
+Manage urgency classification rules used to augment LLM-based signal classification.
+
+```
+tabsordnung rules view                   # Show current rules
+tabsordnung rules edit                   # Open rules file in $EDITOR
+```
+
+Rules file location: `~/.config/tabsordnung/rules`
+
 ### GitHub Triage
 
 Classify GitHub tabs into groups (Needs Attention, Open PRs, Open Issues, Closed/Merged) based on issue/PR status, review requests, and assignment.
@@ -121,18 +159,76 @@ To use live mode, load the extension from this repository into Firefox:
 
 Note: this is a temporary add-on install for local development/testing.
 
+## TUI Views
+
+The TUI has five views, switchable with number keys:
+
+| Key | View | Description |
+|-----|------|-------------|
+| `1` | Tabs | Firefox tabs grouped by tab group, with analysis |
+| `2` | Signals | Activity signals from Gmail, Slack, Matrix |
+| `3` | GitHub | Tracked GitHub issues and PRs |
+| `4` | Bugzilla | Tracked Bugzilla bugs |
+| `5` | Snapshots | Saved tab snapshots |
+
 ## Keys
+
+### Global
 
 | Key | Action |
 |-----|--------|
-| `j`/`k` | Navigate up/down |
-| `h` | Collapse group or jump to parent group |
-| `l` | Expand group or enter first tab |
-| `Enter` | Toggle expand/collapse |
+| `1`-`5` | Switch between views |
+| `j`/`k` or `↑`/`↓` | Navigate up/down |
+| `h` | Collapse group or jump to parent |
+| `l` | Expand group or descend |
+| `Tab` | Toggle focus between left pane and detail pane |
+| `p` | Switch Firefox profile / source |
+| `q` / `Ctrl+C` | Quit |
+
+### Tabs view
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Focus tab in browser (live) or expand/collapse group |
+| `Space` | Toggle select tab (live mode, multi-select) |
 | `f` | Open filter picker |
+| `t` | Cycle display mode (URL / Title / Both) |
+| `s` | Summarize tab with Ollama |
+| `c` | Capture signals from tab |
 | `r` | Reload session data |
-| `p` | Switch Firefox profile |
-| `q` | Quit |
+| `x` | Close selected tab(s) (live mode) |
+| `g` | Move selected tab(s) to group (live mode) |
+| `Esc` | Clear multi-select |
+
+### Signals view
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Navigate to signal in browser |
+| `x` | Mark signal as complete |
+| `u` | Reopen completed signal |
+| `[`/`]` | Cycle urgency (fyi / review / urgent) |
+
+### GitHub / Bugzilla views
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Show detail pane |
+| `t` | Toggle tree mode (grouped) vs flat list |
+| `f` | Cycle filter |
+| `o` | Open in browser |
+| `r` | Refresh from API |
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TABSORDNUNG_PROFILE` | | Default Firefox profile (overridden by `--profile`) |
+| `TABSORDNUNG_MODEL` | `llama3.2` | Ollama model for summarization (overridden by `--model`) |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
+| `TABSORDNUNG_SUMMARY_DIR` | `~/.local/share/tabsordnung/summaries` | Output directory for summaries |
+| `GITHUB_TOKEN` | | GitHub token (alternative to `gh auth login`) |
+| `EDITOR` | `vi` | Editor for `rules edit` command |
 
 ## Live mode
 
