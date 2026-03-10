@@ -21,16 +21,18 @@ type IncomingMsg struct {
 	TabID  int             `json:"tabId,omitempty"`
 	Group  json.RawMessage `json:"group,omitempty"`
 	// Command response fields
-	ID      string `json:"id,omitempty"`
-	OK      *bool  `json:"ok,omitempty"`
-	Error   string `json:"error,omitempty"`
-	GroupID int    `json:"groupId,omitempty"`
-	Content   string `json:"content,omitempty"`
-	Items     string `json:"items,omitempty"`
-	Source    string `json:"source,omitempty"`
-	URL       string `json:"url,omitempty"`
-	ChannelID string `json:"channelId,omitempty"`
-	ThreadTS  string `json:"threadTs,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	OK        *bool           `json:"ok,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	GroupID   int             `json:"groupId,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	Items     string          `json:"items,omitempty"`
+	Visits    json.RawMessage `json:"visits,omitempty"`
+	Source    string          `json:"source,omitempty"`
+	URL       string          `json:"url,omitempty"`
+	ChannelID string          `json:"channelId,omitempty"`
+	ThreadTS  string          `json:"threadTs,omitempty"`
+	Status    string          `json:"status,omitempty"`
 }
 
 // TabToOpen specifies a tab to create in the browser.

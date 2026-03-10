@@ -674,3 +674,12 @@ func TestBugzillaEntityNewColumns(t *testing.T) {
 		t.Error("last_refreshed_at should be NULL initially")
 	}
 }
+
+func TestTabVisitsTableExists(t *testing.T) {
+	db := testDB(t)
+	_, err := db.Exec(`INSERT INTO tab_visits (url, title, tab_id, started_at, ended_at, duration_ms)
+		VALUES ('https://example.com', 'Example', 1, 1700000000000, 1700000010000, 10000)`)
+	if err != nil {
+		t.Fatalf("insert into tab_visits: %v", err)
+	}
+}

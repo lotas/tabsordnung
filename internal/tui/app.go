@@ -16,9 +16,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lotas/tabsordnung/internal/analyzer"
 	"github.com/lotas/tabsordnung/internal/applog"
+	"github.com/lotas/tabsordnung/internal/bugzilla"
 	"github.com/lotas/tabsordnung/internal/classify"
 	"github.com/lotas/tabsordnung/internal/firefox"
-	"github.com/lotas/tabsordnung/internal/bugzilla"
 	"github.com/lotas/tabsordnung/internal/github"
 	"github.com/lotas/tabsordnung/internal/server"
 	"github.com/lotas/tabsordnung/internal/signal"
@@ -84,6 +84,10 @@ type wsCmdResponseMsg struct {
 	error   string
 	content string
 	items   string
+}
+type wsVisitsBatchMsg struct {
+	id  string
+	raw []byte
 }
 type wsGetTabInfoMsg struct {
 	id    string
@@ -562,6 +566,10 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 					continue
 				}
 				return wsTabUpdatedMsg{tab: tab}
+			case "tab.visits_batch":
+				if len(msg.Visits) > 0 {
+					return wsVisitsBatchMsg{id: msg.ID, raw: []byte(msg.Visits)}
+				}
 			case "get-tab-info":
 				return wsGetTabInfoMsg{id: msg.ID, tabID: msg.TabID}
 			case "summarize-tab":
@@ -965,6 +973,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.session != nil {
 			m.removeTab(msg.tabID)
 			return m, tea.Batch(listenWebSocket(m.server), m.scheduleRebuild())
+		}
+		return m, listenWebSocket(m.server)
+
+	case wsVisitsBatchMsg:
+		if m.db != nil {
+			var wireVisits []struct {
+				URL        string `json:"url"`
+				Title      string `json:"title"`
+				TabID      int    `json:"tabId"`
+				StartedAt  int64  `json:"startedAt"`
+				EndedAt    int64  `json:"endedAt"`
+				DurationMs int64  `json:"durationMs"`
+			}
+			if err := json.Unmarshal(msg.raw, &wireVisits); err != nil {
+				applog.Error("visit.batch.parse", err, "rawLen", len(msg.raw))
+			} else {
+				visits := make([]storage.TabVisit, len(wireVisits))
+				for i, w := range wireVisits {
+					visits[i] = storage.TabVisit{
+						URL: w.URL, Title: w.Title, TabID: w.TabID,
+						StartedAt: w.StartedAt, EndedAt: w.EndedAt, DurationMs: w.DurationMs,
+					}
+				}
+				if err := storage.InsertTabVisits(m.db, visits); err != nil {
+					applog.Error("visit.batch.insert", err, "count", len(visits))
+				} else if msg.id != "" {
+					m.server.Send(server.OutgoingMsg{
+						ID:     msg.id,
+						Action: "tab.visits_batch.ack",
+						Status: "stored",
+					})
+				}
+			}
 		}
 		return m, listenWebSocket(m.server)
 

@@ -3,6 +3,7 @@ const RECONNECT_BASE_MS = 1000;
 const ALARM_NAME = "keepalive";
 const RECONNECT_MAX_MS = 30000;
 const DWELL_THRESHOLD_MS = 10000;
+const VISIT_MIN_MS = 5000;
 const SKIP_PROTOCOLS = ["about:", "moz-extension:", "chrome:", "file:", "data:", "resource:"];
 
 let ws = null;
@@ -12,6 +13,11 @@ let pendingPopupRequests = new Map(); // id → {resolve, reject}
 let popupCmdCounter = 0;
 let dwellTimer = null;
 let dwellTabId = null;
+let activeVisit = null;  // { tabId, url, title, startTime }
+let pendingVisits = [];  // completed visits waiting for flush
+let flushInProgress = false;
+let visitCheckpointTimer = null;
+let pendingVisitBatch = null; // { id, count }
 // Per-tab summarize state: "idle" | "pending" | "ready"
 let tabSummarizeState = new Map();
 
@@ -29,10 +35,15 @@ function connect() {
     reconnectDelay = RECONNECT_BASE_MS;
     browser.action.setIcon({ path: { "32": "icons/icon-32.svg" } });
     await sendSnapshot();
+    await flushVisits();
   });
 
-  socket.addEventListener("message", (event) => {
+  socket.addEventListener("message", async (event) => {
     const msg = JSON.parse(event.data);
+    if (msg.action === "tab.visits_batch.ack") {
+      await handleVisitsAck(msg);
+      return;
+    }
     // Route responses to pending popup requests before handleCommand
     if (msg.id && pendingPopupRequests.has(msg.id)) {
       const pending = pendingPopupRequests.get(msg.id);
@@ -135,6 +146,9 @@ browser.tabs.onCreated.addListener((tab) => {
 });
 
 browser.tabs.onRemoved.addListener((tabId) => {
+  if (activeVisit && activeVisit.tabId === tabId) {
+    endVisit();
+  }
   ensureConnected();
   send({ type: "tab.removed", tabId });
   tabSummarizeState.delete(tabId);
@@ -148,6 +162,7 @@ browser.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
     tabSummarizeState.delete(tab.id);
     updateIcon(tab.id);
     startDwellTimer(tab.id, tab.url);
+    startVisit(tab.id, changeInfo.url, tab.title);
   }
 });
 
@@ -164,6 +179,7 @@ browser.tabs.onActivated.addListener(async (activeInfo) => {
     const tab = await browser.tabs.get(activeInfo.tabId);
     updateIcon(tab.id);
     startDwellTimer(tab.id, tab.url);
+    startVisit(tab.id, tab.url, tab.title);
   } catch (e) {
     clearDwellTimer();
   }
@@ -171,6 +187,7 @@ browser.tabs.onActivated.addListener(async (activeInfo) => {
 
 browser.windows.onFocusChanged.addListener(async (windowId) => {
   if (windowId === browser.windows.WINDOW_ID_NONE) {
+    endVisit();
     clearDwellTimer();
     return;
   }
@@ -179,6 +196,7 @@ browser.windows.onFocusChanged.addListener(async (windowId) => {
     if (tab) {
       updateIcon(tab.id);
       startDwellTimer(tab.id, tab.url);
+      startVisit(tab.id, tab.url, tab.title);
     } else {
       clearDwellTimer();
     }
@@ -424,6 +442,10 @@ function nextPopupCmdID() {
   return `popup-${++popupCmdCounter}`;
 }
 
+function nextVisitBatchID() {
+  return `visits-${++popupCmdCounter}`;
+}
+
 browser.runtime.onMessage.addListener((message, _sender) => {
   if (message.action === "get-tab-info") {
     return handleGetTabInfo();
@@ -622,6 +644,152 @@ function shouldSkipURL(url) {
   return SKIP_PROTOCOLS.some(p => url.startsWith(p));
 }
 
+// --- Visit tracking ---
+
+async function loadPersistedVisits() {
+  const data = await browser.storage.local.get(['pendingVisits', 'activeVisit']);
+  pendingVisits = data.pendingVisits || [];
+  // Close any orphaned active visit from previous session
+  if (data.activeVisit) {
+    const orphan = data.activeVisit;
+    const endTime = Date.now();
+    const duration = endTime - orphan.startTime;
+    if (duration >= VISIT_MIN_MS && pendingVisits.length < 2000) {
+      pendingVisits.push({
+        url: orphan.url, title: orphan.title, tabId: orphan.tabId,
+        startedAt: orphan.startTime, endedAt: endTime, durationMs: duration,
+      });
+    }
+  }
+  await persistVisits();
+}
+
+function canFlushVisits() {
+  return ws?.readyState === WebSocket.OPEN;
+}
+
+async function queueVisit(visit) {
+  if (pendingVisits.length >= 2000) {
+    pendingVisits.shift();
+  }
+  pendingVisits.push(visit);
+  await persistVisits();
+}
+
+async function initializeActiveVisit() {
+  try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    if (!tab) return;
+    startVisit(tab.id, tab.url, tab.title);
+  } catch (_e) {
+    // Best effort only; activation/focus listeners will recover later.
+  }
+}
+
+async function persistVisits() {
+  await browser.storage.local.set({ pendingVisits, activeVisit });
+}
+
+function clearVisitCheckpointTimer() {
+  if (visitCheckpointTimer) {
+    clearTimeout(visitCheckpointTimer);
+    visitCheckpointTimer = null;
+  }
+}
+
+function scheduleVisitCheckpoint() {
+  clearVisitCheckpointTimer();
+  if (!activeVisit) return;
+  visitCheckpointTimer = setTimeout(() => {
+    checkpointActiveVisit();
+  }, VISIT_MIN_MS);
+}
+
+function startVisit(tabId, url, title) {
+  endVisit();
+  clearVisitCheckpointTimer();
+  if (shouldSkipURL(url)) return;
+  activeVisit = { tabId, url, title, startTime: Date.now() };
+  persistVisits();
+  scheduleVisitCheckpoint();
+}
+
+async function endVisit() {
+  if (!activeVisit) return;
+  clearVisitCheckpointTimer();
+  const visit = activeVisit;
+  activeVisit = null;
+  await persistVisits();
+  const endTime = Date.now();
+  const duration = endTime - visit.startTime;
+  if (duration >= VISIT_MIN_MS) {
+    await queueVisit({
+      url: visit.url, title: visit.title, tabId: visit.tabId,
+      startedAt: visit.startTime, endedAt: endTime, durationMs: duration,
+    });
+  }
+  await flushVisits();
+}
+
+async function checkpointActiveVisit() {
+  if (!activeVisit) return;
+  const visit = activeVisit;
+  const endTime = Date.now();
+  const duration = endTime - visit.startTime;
+  if (duration < VISIT_MIN_MS) return;
+
+  activeVisit = {
+    tabId: visit.tabId,
+    url: visit.url,
+    title: visit.title,
+    startTime: endTime,
+  };
+  await queueVisit({
+    url: visit.url,
+    title: visit.title,
+    tabId: visit.tabId,
+    startedAt: visit.startTime,
+    endedAt: endTime,
+    durationMs: duration,
+  });
+  await persistVisits();
+  await flushVisits();
+}
+
+async function flushVisits() {
+  if (flushInProgress || !canFlushVisits()) {
+    return;
+  }
+  if (!pendingVisitBatch && pendingVisits.length === 0) {
+    return;
+  }
+  flushInProgress = true;
+  try {
+    if (!pendingVisitBatch) {
+      pendingVisitBatch = {
+        id: nextVisitBatchID(),
+        count: pendingVisits.length,
+      };
+    }
+    const visits = pendingVisits.slice(0, pendingVisitBatch.count);
+    if (visits.length === 0) {
+      pendingVisitBatch = null;
+      return;
+    }
+    send({ type: 'tab.visits_batch', id: pendingVisitBatch.id, visits });
+  } finally {
+    flushInProgress = false;
+  }
+}
+
+async function handleVisitsAck(msg) {
+  if (!pendingVisitBatch || msg.id !== pendingVisitBatch.id) return;
+  pendingVisits.splice(0, pendingVisitBatch.count);
+  pendingVisitBatch = null;
+  await persistVisits();
+  await flushVisits();
+}
+
 function updateIcon(tabId) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return; // don't override grey disconnected icon
   const state = tabSummarizeState.get(tabId) || "idle";
@@ -710,7 +878,10 @@ browser.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
 browser.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_NAME) {
     ensureConnected();
+    flushVisits();
   }
 });
 
-connect();
+loadPersistedVisits()
+  .then(() => initializeActiveVisit())
+  .then(() => connect());

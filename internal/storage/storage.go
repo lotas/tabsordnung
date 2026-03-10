@@ -308,6 +308,26 @@ CREATE TABLE slack_thread_summaries (
     UNIQUE(channel_id, thread_ts)
 );`,
 	},
+	{
+		Version:     11,
+		Description: "create tab_visits table",
+		SQL: `
+CREATE TABLE tab_visits (
+    id          INTEGER PRIMARY KEY,
+    url         TEXT NOT NULL,
+    title       TEXT,
+    tab_id      INTEGER,
+    started_at  INTEGER NOT NULL,
+    ended_at    INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL
+);
+CREATE INDEX idx_tab_visits_started ON tab_visits(started_at);`,
+	},
+	{
+		Version:     12,
+		Description: "dedupe tab visits with unique index",
+		SQL:         `CREATE UNIQUE INDEX idx_tab_visits_unique ON tab_visits(tab_id, url, started_at, ended_at);`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.

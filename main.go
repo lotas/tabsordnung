@@ -58,6 +58,9 @@ func main() {
 		case "rules":
 			runRules(os.Args[2:])
 			return
+		case "history":
+			runHistory(os.Args[2:])
+			return
 		case "help", "--help", "-h":
 			printHelp()
 			return
@@ -176,6 +179,12 @@ Usage:
   tabsordnung github list [--all] [--json] [--state X] [--kind X] [--repo owner/repo]  List tracked GitHub entities
   tabsordnung bugzilla                                   List tracked Bugzilla issues
   tabsordnung bugzilla list [--json] [--host domain]    List tracked Bugzilla issues
+
+  tabsordnung history                                  Show tab visit history
+    --date <YYYY-MM-DD>    Date to query (default: today)
+    --week                 Query the current week (Mon–Sun)
+    --month                Query the current calendar month
+    --json                 Output as JSON
 
   tabsordnung rules view                               Show urgency classification rules
   tabsordnung rules edit                               Open rules file in $EDITOR
@@ -875,6 +884,78 @@ func runSignalsReopen(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Signal %d reopened.\n", id)
+}
+
+func runHistory(args []string) {
+	fs := flag.NewFlagSet("history", flag.ExitOnError)
+	dateFlag := fs.String("date", "", "Date to query (YYYY-MM-DD), default: today")
+	weekFlag := fs.Bool("week", false, "Query the current week (Mon–Sun)")
+	monthFlag := fs.Bool("month", false, "Query the current calendar month")
+	jsonFlag := fs.Bool("json", false, "Output as JSON")
+	fs.Parse(args)
+
+	loc := time.Local
+	now := time.Now().In(loc)
+
+	var from, to time.Time
+	var label string
+	switch {
+	case *weekFlag:
+		weekday := int(now.Weekday())
+		if weekday == 0 {
+			weekday = 7
+		}
+		from = time.Date(now.Year(), now.Month(), now.Day()-weekday+1, 0, 0, 0, 0, loc)
+		to = from.AddDate(0, 0, 7)
+		label = fmt.Sprintf("week of %s", from.Format("2006-01-02"))
+	case *monthFlag:
+		from = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
+		to = from.AddDate(0, 1, 0)
+		label = from.Format("January 2006")
+	default:
+		d := now
+		if *dateFlag != "" {
+			parsed, err := time.ParseInLocation("2006-01-02", *dateFlag, loc)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Invalid date %q (expected YYYY-MM-DD)\n", *dateFlag)
+				os.Exit(1)
+			}
+			d = parsed
+		}
+		from = time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, loc)
+		to = from.AddDate(0, 0, 1)
+		label = from.Format("2006-01-02")
+	}
+
+	db, err := openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	visits, err := storage.QueryTabVisitSummary(db, from, to)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error querying visits: %v\n", err)
+		os.Exit(1)
+	}
+
+	sigs, err := storage.ListSignalsInRange(db, from, to)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error querying signals: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonFlag {
+		out, err := storage.FormatHistoryJSON(visits, sigs, label)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(out)
+	} else {
+		fmt.Print(storage.FormatHistoryMarkdown(visits, sigs, label))
+	}
 }
 
 func runGitHub(args []string) {
