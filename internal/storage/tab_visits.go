@@ -136,18 +136,18 @@ func FormatHistoryMarkdown(visits []TabVisitSummary, signals []SignalRecord, lab
 	if totalPages == 0 {
 		b.WriteString("No tab activity recorded.\n\n")
 	} else {
-		b.WriteString("| Visits | Time    | Title                              | URL\n")
-		b.WriteString("|--------|---------|------------------------------------|-----------------------------------------\n")
+		b.WriteString("| Visits | Time    | Title                                                  | URL\n")
+		b.WriteString("|--------|---------|--------------------------------------------------------|-------------------------------------------------------------\n")
 		for _, v := range visits {
 			title := v.Title
-			if len(title) > 34 {
-				title = title[:31] + "..."
+			if len(title) > 54 {
+				title = title[:51] + "..."
 			}
 			url := v.URL
-			if len(url) > 41 {
-				url = url[:38] + "..."
+			if len(url) > 61 {
+				url = url[:58] + "..."
 			}
-			fmt.Fprintf(&b, "| %6d | %-7s | %-34s | %s\n",
+			fmt.Fprintf(&b, "| %6d | %-7s | %-54s | %s\n",
 				v.Visits, formatDuration(v.TotalMs), title, url)
 		}
 		b.WriteString("\n")

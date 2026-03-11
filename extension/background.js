@@ -4,6 +4,7 @@ const ALARM_NAME = "keepalive";
 const RECONNECT_MAX_MS = 30000;
 const DWELL_THRESHOLD_MS = 10000;
 const VISIT_MIN_MS = 5000;
+const IDLE_THRESHOLD_SECONDS = 60;
 const SKIP_PROTOCOLS = ["about:", "moz-extension:", "chrome:", "file:", "data:", "resource:"];
 
 let ws = null;
@@ -18,6 +19,7 @@ let pendingVisits = [];  // completed visits waiting for flush
 let flushInProgress = false;
 let visitCheckpointTimer = null;
 let pendingVisitBatch = null; // { id, count }
+let idleState = "active";
 // Per-tab summarize state: "idle" | "pending" | "ready"
 let tabSummarizeState = new Map();
 
@@ -175,6 +177,7 @@ browser.tabs.onMoved.addListener(async (tabId) => {
 // --- Dwell tracking ---
 
 browser.tabs.onActivated.addListener(async (activeInfo) => {
+  if (idleState !== "active") return;
   try {
     const tab = await browser.tabs.get(activeInfo.tabId);
     updateIcon(tab.id);
@@ -188,6 +191,10 @@ browser.tabs.onActivated.addListener(async (activeInfo) => {
 browser.windows.onFocusChanged.addListener(async (windowId) => {
   if (windowId === browser.windows.WINDOW_ID_NONE) {
     endVisit();
+    clearDwellTimer();
+    return;
+  }
+  if (idleState !== "active") {
     clearDwellTimer();
     return;
   }
@@ -644,6 +651,22 @@ function shouldSkipURL(url) {
   return SKIP_PROTOCOLS.some(p => url.startsWith(p));
 }
 
+async function resumeTrackingActiveTab() {
+  if (idleState !== "active") return;
+  try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    if (!tab) {
+      clearDwellTimer();
+      return;
+    }
+    updateIcon(tab.id);
+    startDwellTimer(tab.id, tab.url);
+    startVisit(tab.id, tab.url, tab.title);
+  } catch (_e) {
+    clearDwellTimer();
+  }
+}
+
 // --- Visit tracking ---
 
 async function loadPersistedVisits() {
@@ -677,13 +700,7 @@ async function queueVisit(visit) {
 }
 
 async function initializeActiveVisit() {
-  try {
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-    if (!tab) return;
-    startVisit(tab.id, tab.url, tab.title);
-  } catch (_e) {
-    // Best effort only; activation/focus listeners will recover later.
-  }
+  await resumeTrackingActiveTab();
 }
 
 async function persistVisits() {
@@ -708,6 +725,7 @@ function scheduleVisitCheckpoint() {
 function startVisit(tabId, url, title) {
   endVisit();
   clearVisitCheckpointTimer();
+  if (idleState !== "active") return;
   if (shouldSkipURL(url)) return;
   activeVisit = { tabId, url, title, startTime: Date.now() };
   persistVisits();
@@ -882,6 +900,25 @@ browser.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
+browser.idle.setDetectionInterval(IDLE_THRESHOLD_SECONDS);
+
+browser.idle.onStateChanged.addListener((newState) => {
+  idleState = newState;
+  if (newState === "active") {
+    resumeTrackingActiveTab();
+    return;
+  }
+  endVisit();
+  clearDwellTimer();
+});
+
 loadPersistedVisits()
+  .then(async () => {
+    try {
+      idleState = await browser.idle.queryState(IDLE_THRESHOLD_SECONDS);
+    } catch (_e) {
+      idleState = "active";
+    }
+  })
   .then(() => initializeActiveVisit())
   .then(() => connect());
