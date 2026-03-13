@@ -20,9 +20,17 @@ type snapshotDetailMsg struct {
 	err  error
 }
 
+type snapshotNode struct {
+	IsHeader bool
+	Header   string
+	DayKey   string // "2026-03-13" used for expand/collapse
+	Snapshot *storage.SnapshotSummary
+}
+
 type SnapshotsView struct {
 	db        *sql.DB
 	snapshots []storage.SnapshotSummary
+	nodes     []snapshotNode
 	selected  *storage.SnapshotFull
 	cursor    int
 	offset    int
@@ -34,6 +42,9 @@ type SnapshotsView struct {
 	loaded    bool
 	err       error
 
+	// Tree state
+	dayExpanded map[string]bool
+
 	// Right pane state
 	groupExpanded map[string]bool
 	focusDetail   bool
@@ -42,6 +53,7 @@ type SnapshotsView struct {
 func NewSnapshotsView(db *sql.DB) SnapshotsView {
 	return SnapshotsView{
 		db:            db,
+		dayExpanded:   make(map[string]bool),
 		groupExpanded: make(map[string]bool),
 	}
 }
@@ -77,8 +89,61 @@ func (v *SnapshotsView) SetSize(w, h int) {
 	v.width = w
 	v.height = h
 	v.treeWidth = w * TreeWidthPct / 100
-	v.detail.Width = w - v.treeWidth - 3
+	v.detail.Width = w - v.treeWidth - 4
 	v.detail.Height = h
+}
+
+func (v *SnapshotsView) buildNodes() {
+	v.nodes = nil
+
+	// Group snapshots by day
+	type dayGroup struct {
+		key       string // "2026-03-13"
+		label     string // "2026-03-13 (Thu)"
+		snapshots []*storage.SnapshotSummary
+	}
+	var days []*dayGroup
+	dayMap := make(map[string]*dayGroup)
+
+	for i := range v.snapshots {
+		s := &v.snapshots[i]
+		key := s.CreatedAt.Local().Format("2006-01-02")
+		if _, ok := dayMap[key]; !ok {
+			label := s.CreatedAt.Local().Format("2006-01-02 (Mon)")
+			d := &dayGroup{key: key, label: label}
+			dayMap[key] = d
+			days = append(days, d)
+		}
+		dayMap[key].snapshots = append(dayMap[key].snapshots, s)
+	}
+
+	for _, d := range days {
+		icon := "▸"
+		if v.dayExpanded[d.key] {
+			icon = "▼"
+		}
+		header := fmt.Sprintf("%s %s (%d)", icon, d.label, len(d.snapshots))
+		v.nodes = append(v.nodes, snapshotNode{
+			IsHeader: true,
+			Header:   header,
+			DayKey:   d.key,
+		})
+		if v.dayExpanded[d.key] {
+			for _, s := range d.snapshots {
+				v.nodes = append(v.nodes, snapshotNode{
+					Snapshot: s,
+					DayKey:   d.key,
+				})
+			}
+		}
+	}
+}
+
+func (v *SnapshotsView) selectedSnapshot() *storage.SnapshotSummary {
+	if v.cursor >= 0 && v.cursor < len(v.nodes) {
+		return v.nodes[v.cursor].Snapshot
+	}
+	return nil
 }
 
 func (v SnapshotsView) Update(msg tea.Msg) (SnapshotsView, tea.Cmd) {
@@ -92,8 +157,13 @@ func (v SnapshotsView) Update(msg tea.Msg) (SnapshotsView, tea.Cmd) {
 		}
 		v.snapshots = msg.snapshots
 		v.err = nil
-		if len(v.snapshots) > 0 {
-			return v, v.loadDetail(v.snapshots[0].Profile, v.snapshots[0].Rev)
+		v.buildNodes()
+		// Auto-select first snapshot if available
+		for i, n := range v.nodes {
+			if n.Snapshot != nil {
+				v.cursor = i
+				return v, v.loadDetail(n.Snapshot.Profile, n.Snapshot.Rev)
+			}
 		}
 		return v, nil
 
@@ -103,7 +173,7 @@ func (v SnapshotsView) Update(msg tea.Msg) (SnapshotsView, tea.Cmd) {
 			return v, nil
 		}
 		v.selected = msg.snap
-		// Auto-expand all groups
+		// Auto-expand all groups in detail
 		v.groupExpanded = make(map[string]bool)
 		if msg.snap != nil {
 			for _, g := range msg.snap.Groups {
@@ -112,6 +182,57 @@ func (v SnapshotsView) Update(msg tea.Msg) (SnapshotsView, tea.Cmd) {
 			v.groupExpanded["Ungrouped"] = true
 		}
 		v.detail.Scroll = 0
+		v.detail.ContentLen = v.computeDetailLineCount()
+		return v, nil
+
+	case tea.MouseMsg:
+		switch msg.Button {
+		case tea.MouseButtonLeft:
+			onDetail := msg.X > v.treeWidth+1
+			v.focusDetail = onDetail
+			if !onDetail && len(v.nodes) > 0 {
+				row := msg.Y - 2
+				idx := v.offset + row
+				if row >= 0 && row < v.height && idx >= 0 && idx < len(v.nodes) && idx != v.cursor {
+					v.cursor = idx
+					v.adjustOffset()
+					node := v.nodes[v.cursor]
+					if node.IsHeader {
+						v.dayExpanded[node.DayKey] = !v.dayExpanded[node.DayKey]
+						v.buildNodes()
+						if v.cursor >= len(v.nodes) {
+							v.cursor = len(v.nodes) - 1
+						}
+					} else if node.Snapshot != nil {
+						return v, v.loadDetail(node.Snapshot.Profile, node.Snapshot.Rev)
+					}
+				}
+			}
+		case tea.MouseButtonWheelUp:
+			onDetail := msg.X > v.treeWidth+1
+			if onDetail {
+				v.detail.ScrollUp()
+			} else if v.cursor > 0 {
+				v.cursor--
+				v.adjustOffset()
+				if s := v.selectedSnapshot(); s != nil {
+					v.detail.Scroll = 0
+					return v, v.loadDetail(s.Profile, s.Rev)
+				}
+			}
+		case tea.MouseButtonWheelDown:
+			onDetail := msg.X > v.treeWidth+1
+			if onDetail {
+				v.detail.ScrollDown()
+			} else if v.cursor < len(v.nodes)-1 {
+				v.cursor++
+				v.adjustOffset()
+				if s := v.selectedSnapshot(); s != nil {
+					v.detail.Scroll = 0
+					return v, v.loadDetail(s.Profile, s.Rev)
+				}
+			}
+		}
 		return v, nil
 
 	case tea.KeyMsg:
@@ -130,19 +251,70 @@ func (v SnapshotsView) Update(msg tea.Msg) (SnapshotsView, tea.Cmd) {
 
 		switch msg.String() {
 		case "j", "down":
-			if v.cursor < len(v.snapshots)-1 {
+			if v.cursor < len(v.nodes)-1 {
 				v.cursor++
 				v.adjustOffset()
-				return v, v.loadDetail(v.snapshots[v.cursor].Profile, v.snapshots[v.cursor].Rev)
+				v.detail.Scroll = 0
+				if s := v.selectedSnapshot(); s != nil {
+					return v, v.loadDetail(s.Profile, s.Rev)
+				}
 			}
 		case "k", "up":
 			if v.cursor > 0 {
 				v.cursor--
 				v.adjustOffset()
-				return v, v.loadDetail(v.snapshots[v.cursor].Profile, v.snapshots[v.cursor].Rev)
+				v.detail.Scroll = 0
+				if s := v.selectedSnapshot(); s != nil {
+					return v, v.loadDetail(s.Profile, s.Rev)
+				}
 			}
-		case "enter":
-			v.focusDetail = true
+		case "h":
+			// Collapse current day or jump to parent header
+			if v.cursor >= 0 && v.cursor < len(v.nodes) {
+				node := v.nodes[v.cursor]
+				if node.IsHeader {
+					v.dayExpanded[node.DayKey] = false
+					v.buildNodes()
+				} else {
+					// Jump to parent header
+					for i := v.cursor - 1; i >= 0; i-- {
+						if v.nodes[i].IsHeader {
+							v.cursor = i
+							v.adjustOffset()
+							break
+						}
+					}
+				}
+			}
+		case "l":
+			// Expand header or move down
+			if v.cursor >= 0 && v.cursor < len(v.nodes) {
+				node := v.nodes[v.cursor]
+				if node.IsHeader && !v.dayExpanded[node.DayKey] {
+					v.dayExpanded[node.DayKey] = true
+					v.buildNodes()
+				} else if v.cursor < len(v.nodes)-1 {
+					v.cursor++
+					v.adjustOffset()
+					v.detail.Scroll = 0
+					if s := v.selectedSnapshot(); s != nil {
+						return v, v.loadDetail(s.Profile, s.Rev)
+					}
+				}
+			}
+		case "enter", " ":
+			if v.cursor >= 0 && v.cursor < len(v.nodes) {
+				node := v.nodes[v.cursor]
+				if node.IsHeader {
+					v.dayExpanded[node.DayKey] = !v.dayExpanded[node.DayKey]
+					v.buildNodes()
+					if v.cursor >= len(v.nodes) {
+						v.cursor = len(v.nodes) - 1
+					}
+				} else {
+					v.focusDetail = true
+				}
+			}
 		}
 	}
 	return v, nil
@@ -152,13 +324,36 @@ func (v *SnapshotsView) adjustOffset() {
 	if v.cursor < v.offset {
 		v.offset = v.cursor
 	}
-	visible := v.height - 2
+	visible := v.height
 	if visible < 1 {
 		visible = 1
 	}
 	if v.cursor >= v.offset+visible {
 		v.offset = v.cursor - visible + 1
 	}
+}
+
+func (v SnapshotsView) computeDetailLineCount() int {
+	if v.selected == nil {
+		return 0
+	}
+	lines := 3
+	if v.selected.Name != "" {
+		lines++
+	}
+	seen := make(map[string]bool)
+	for _, tab := range v.selected.Tabs {
+		gname := tab.GroupName
+		if gname == "" {
+			gname = "Ungrouped"
+		}
+		if !seen[gname] {
+			seen[gname] = true
+			lines += 2
+		}
+		lines++
+	}
+	return lines
 }
 
 func (v SnapshotsView) ViewList() string {
@@ -168,33 +363,46 @@ func (v SnapshotsView) ViewList() string {
 	if v.err != nil {
 		return fmt.Sprintf("Error: %v", v.err)
 	}
-	if len(v.snapshots) == 0 {
+	if len(v.nodes) == 0 {
 		return "No snapshots yet."
 	}
 
 	cursorStyle := lipgloss.NewStyle().Bold(true).Reverse(true)
+	headerStyle := lipgloss.NewStyle().Bold(true)
 	treeWidth := v.treeWidth
 
 	var b strings.Builder
 	end := v.offset + v.height
-	if end > len(v.snapshots) {
-		end = len(v.snapshots)
+	if end > len(v.nodes) {
+		end = len(v.nodes)
 	}
 
 	for i := v.offset; i < end; i++ {
-		s := v.snapshots[i]
-		ts := s.CreatedAt.Local().Format("2006-01-02 15:04")
-		label := ""
-		if s.Name != "" {
-			label = " " + s.Name
+		node := v.nodes[i]
+		var line string
+
+		if node.IsHeader {
+			line = headerStyle.Render(truncateString(node.Header, treeWidth-1))
+		} else if node.Snapshot != nil {
+			s := node.Snapshot
+			ts := s.CreatedAt.Local().Format("15:04")
+			label := ""
+			if s.Name != "" {
+				label = " " + s.Name
+			}
+			line = fmt.Sprintf("    %s  %s  (%d tabs)%s", ts, s.Profile, s.TabCount, label)
+			if len(line) > treeWidth {
+				line = line[:treeWidth-1] + "…"
+			}
 		}
-		line := fmt.Sprintf("  %s  %s  (%d tabs)%s", ts, s.Profile, s.TabCount, label)
 
 		if i == v.cursor {
-			for len(line) < treeWidth {
-				line += " "
+			// Strip styling for width padding, re-render with cursor
+			plain := line
+			for len(plain) < treeWidth {
+				plain += " "
 			}
-			line = cursorStyle.Render(line)
+			line = cursorStyle.Render(plain)
 		}
 
 		b.WriteString(line)
@@ -217,13 +425,14 @@ func (v SnapshotsView) ViewDetail() string {
 	var b strings.Builder
 
 	b.WriteString(labelStyle.Render("Snapshot") + "\n")
-	b.WriteString(fmt.Sprintf("Rev %d · %s · %s · %d tabs\n",
+	summaryLine := fmt.Sprintf("Rev %d · %s · %s · %d tabs",
 		v.selected.Rev,
 		v.selected.Profile,
 		v.selected.CreatedAt.Local().Format("2006-01-02 15:04"),
-		v.selected.TabCount))
+		v.selected.TabCount)
+	b.WriteString(truncateString(summaryLine, v.detail.Width) + "\n")
 	if v.selected.Name != "" {
-		b.WriteString(fmt.Sprintf("Label: %s\n", v.selected.Name))
+		b.WriteString(truncateString("Label: "+v.selected.Name, v.detail.Width) + "\n")
 	}
 	b.WriteString("\n")
 
@@ -249,7 +458,8 @@ func (v SnapshotsView) ViewDetail() string {
 
 	for _, gname := range groupOrder {
 		ge := groupMap[gname]
-		b.WriteString(groupStyle.Render(fmt.Sprintf("▼ %s (%d tabs)", ge.name, len(ge.tabs))) + "\n")
+		groupHeader := fmt.Sprintf("▼ %s (%d tabs)", ge.name, len(ge.tabs))
+		b.WriteString(groupStyle.Render(truncateString(groupHeader, v.detail.Width)) + "\n")
 		for _, tab := range ge.tabs {
 			title := tab.Title
 			maxLen := v.detail.Width - 6

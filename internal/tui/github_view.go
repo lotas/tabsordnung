@@ -74,7 +74,7 @@ func (v *GitHubView) Reload() tea.Cmd {
 func (v *GitHubView) SetSize(w, h int) {
 	v.width = w
 	v.height = h
-	v.detail.Width = w - (w * TreeWidthPct / 100) - 3
+	v.detail.Width = w - (w * TreeWidthPct / 100) - 4
 	v.detail.Height = h
 }
 
@@ -201,6 +201,31 @@ func (v GitHubView) Update(msg tea.Msg) (GitHubView, tea.Cmd) {
 		}
 		// Reload from DB after refresh
 		return v, v.Reload()
+
+	case tea.MouseMsg:
+		treeWidth := v.width * TreeWidthPct / 100
+		onDetail := msg.X > treeWidth+1
+		switch msg.Button {
+		case tea.MouseButtonLeft:
+			v.focusDetail = onDetail
+		case tea.MouseButtonWheelUp:
+			if onDetail {
+				v.detail.ScrollUp()
+			} else if v.cursor > 0 {
+				v.cursor--
+				v.adjustOffset()
+				v.detail.Scroll = 0
+			}
+		case tea.MouseButtonWheelDown:
+			if onDetail {
+				v.detail.ScrollDown()
+			} else if v.cursor < len(v.nodes)-1 {
+				v.cursor++
+				v.adjustOffset()
+				v.detail.Scroll = 0
+			}
+		}
+		return v, nil
 
 	case tea.KeyMsg:
 		if v.focusDetail {

@@ -64,7 +64,7 @@ func (v *SignalsView) Reload() tea.Cmd {
 func (v *SignalsView) SetSize(w, h int) {
 	v.width = w
 	v.height = h
-	v.detail.Width = w - (w * TreeWidthPct / 100) - 3
+	v.detail.Width = w - (w * TreeWidthPct / 100) - 4
 	v.detail.Height = h
 }
 
@@ -190,6 +190,31 @@ func (v SignalsView) Update(msg tea.Msg) (SignalsView, tea.Cmd) {
 	case signalActionMsg:
 		// Reload after complete/reopen
 		return v, v.Reload()
+
+	case tea.MouseMsg:
+		treeWidth := v.width * TreeWidthPct / 100
+		onDetail := msg.X > treeWidth+1
+		switch msg.Button {
+		case tea.MouseButtonLeft:
+			v.focusDetail = onDetail
+		case tea.MouseButtonWheelUp:
+			if onDetail {
+				v.detail.ScrollUp()
+			} else if v.cursor > 0 {
+				v.cursor--
+				v.adjustOffset()
+				v.detail.Scroll = 0
+			}
+		case tea.MouseButtonWheelDown:
+			if onDetail {
+				v.detail.ScrollDown()
+			} else if v.cursor < len(v.nodes)-1 {
+				v.cursor++
+				v.adjustOffset()
+				v.detail.Scroll = 0
+			}
+		}
+		return v, nil
 
 	case tea.KeyMsg:
 		if v.focusDetail {

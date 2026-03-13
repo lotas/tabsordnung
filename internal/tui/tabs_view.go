@@ -82,7 +82,7 @@ func (v *TabsView) SetSize(w, h int) {
 	paneHeight := h - 4
 	v.tree.Width = treeWidth
 	v.tree.Height = paneHeight
-	detailWidth := w - treeWidth - 3
+	detailWidth := w - treeWidth - 4
 	v.detail.Width = detailWidth
 	v.detail.Height = paneHeight
 }
@@ -166,6 +166,12 @@ func (v *TabsView) refreshSignals() {
 		} else {
 			v.signals = nil
 		}
+		// Set ContentLen for ScrollDown() bounds (headerLines=10 matches scrollDetailToSignalCursor)
+		if len(v.signals) > 0 {
+			v.detail.ContentLen = 10 + len(v.signals) + 5
+		} else {
+			v.detail.ContentLen = 0
+		}
 	}
 }
 
@@ -248,6 +254,8 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 		treeWidth := v.width * TreeWidthPct / 100
 		onDetail := msg.X > treeWidth+1
 		switch msg.Button {
+		case tea.MouseButtonLeft:
+			v.focusDetail = onDetail
 		case tea.MouseButtonWheelUp:
 			if onDetail {
 				v.detail.ScrollUp()
@@ -503,7 +511,7 @@ func (v TabsView) ViewDetail() string {
 		return ""
 	}
 
-	detailWidth := v.width - (v.width * TreeWidthPct / 100) - 3
+	detailWidth := v.width - (v.width * TreeWidthPct / 100) - 4
 	var detailContent string
 
 	if node.Tab != nil {
@@ -588,6 +596,6 @@ func (v TabsView) BottomBar() string {
 	filterStr := fmt.Sprintf("[filter: %s]", filterNames[v.tree.Filter])
 	displayNames := []string{"URL", "Title", "Both"}
 	displayStr := fmt.Sprintf("[T: %s]", displayNames[v.tree.DisplayMode])
-	s += "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 f filter \u00b7 t display \u00b7 r refresh \u00b7 p source \u00b7 q quit  " + filterStr + " " + displayStr
+	s += "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 f filter \u00b7 t display \u00b7 r refresh \u00b7 1-6 view \u00b7 p source \u00b7 q quit  " + filterStr + " " + displayStr
 	return s
 }

@@ -28,6 +28,21 @@ type TabVisitSummary struct {
 	LastSeen  time.Time
 }
 
+type ActivityPeriodKind string
+
+const (
+	ActivityPeriodDay   ActivityPeriodKind = "day"
+	ActivityPeriodWeek  ActivityPeriodKind = "week"
+	ActivityPeriodMonth ActivityPeriodKind = "month"
+)
+
+type ActivityPeriodSummary struct {
+	Label      string
+	From       time.Time
+	To         time.Time
+	VisitCount int
+}
+
 // InsertTabVisits bulk-inserts completed visits into tab_visits.
 func InsertTabVisits(db *sql.DB, visits []TabVisit) error {
 	if len(visits) == 0 {
@@ -81,6 +96,64 @@ func QueryTabVisitSummary(db *sql.DB, from, to time.Time) ([]TabVisitSummary, er
 		result = append(result, s)
 	}
 	return result, rows.Err()
+}
+
+func ActivityPeriodBounds(kind ActivityPeriodKind, t time.Time, loc *time.Location) (time.Time, time.Time, string) {
+	if loc == nil {
+		loc = time.Local
+	}
+	local := t.In(loc)
+	switch kind {
+	case ActivityPeriodWeek:
+		weekday := int(local.Weekday())
+		if weekday == 0 {
+			weekday = 7
+		}
+		from := time.Date(local.Year(), local.Month(), local.Day()-weekday+1, 0, 0, 0, 0, loc)
+		to := from.AddDate(0, 0, 7)
+		return from, to, fmt.Sprintf("Week of %s", from.Format("2006-01-02"))
+	case ActivityPeriodMonth:
+		from := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, loc)
+		to := from.AddDate(0, 1, 0)
+		return from, to, from.Format("2006-01")
+	default:
+		from := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
+		to := from.AddDate(0, 0, 1)
+		return from, to, from.Format("2006-01-02")
+	}
+}
+
+func ListActivityPeriods(db *sql.DB, kind ActivityPeriodKind, loc *time.Location) ([]ActivityPeriodSummary, error) {
+	rows, err := db.Query(`SELECT started_at FROM tab_visits ORDER BY started_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("query activity periods: %w", err)
+	}
+	defer rows.Close()
+
+	var periods []ActivityPeriodSummary
+	indexByLabel := make(map[string]int)
+	for rows.Next() {
+		var startedAt int64
+		if err := rows.Scan(&startedAt); err != nil {
+			return nil, fmt.Errorf("scan activity period: %w", err)
+		}
+		from, to, label := ActivityPeriodBounds(kind, time.UnixMilli(startedAt), loc)
+		if idx, ok := indexByLabel[label]; ok {
+			periods[idx].VisitCount++
+			continue
+		}
+		indexByLabel[label] = len(periods)
+		periods = append(periods, ActivityPeriodSummary{
+			Label:      label,
+			From:       from,
+			To:         to,
+			VisitCount: 1,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return periods, nil
 }
 
 // ListSignalsInRange returns signals captured within [from, to).
