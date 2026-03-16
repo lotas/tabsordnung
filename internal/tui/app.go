@@ -1590,7 +1590,7 @@ func (m Model) View() string {
 	case ViewBugzilla:
 		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 detail \u00b7 tab focus \u00b7 t tree \u00b7 f filter \u00b7 r reload \u00b7 o browser \u00b7 1-6 view \u00b7 q quit"
 	case ViewActivity:
-		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 detail \u00b7 [/] day-week-month \u00b7 1-6 view \u00b7 p source \u00b7 q quit"
+		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 detail \u00b7 d domain \u00b7 [/] day-week-month \u00b7 1-6 view \u00b7 p source \u00b7 q quit"
 	case ViewSnapshots:
 		bottomText = "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 1-6 view \u00b7 p source \u00b7 q quit"
 	}

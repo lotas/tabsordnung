@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -26,6 +28,65 @@ type TabVisitSummary struct {
 	TotalMs   int64
 	FirstSeen time.Time
 	LastSeen  time.Time
+}
+
+// DomainVisitSummary aggregates visits for a domain over a time range.
+type DomainVisitSummary struct {
+	Domain   string
+	URLs     int    // unique URL count
+	Visits   int    // total visits
+	TotalMs  int64  // total duration
+	TopTitle string // title of most-visited URL
+}
+
+// GroupByDomain aggregates TabVisitSummary entries by domain.
+// Returns results sorted by total visits descending.
+func GroupByDomain(visits []TabVisitSummary) []DomainVisitSummary {
+	type domainAgg struct {
+		urls      map[string]struct{}
+		visits    int
+		totalMs   int64
+		topTitle  string
+		topVisits int
+	}
+	agg := make(map[string]*domainAgg)
+	for _, v := range visits {
+		domain := extractDomain(v.URL)
+		d, ok := agg[domain]
+		if !ok {
+			d = &domainAgg{urls: make(map[string]struct{})}
+			agg[domain] = d
+		}
+		d.urls[v.URL] = struct{}{}
+		d.visits += v.Visits
+		d.totalMs += v.TotalMs
+		if v.Visits > d.topVisits {
+			d.topVisits = v.Visits
+			d.topTitle = v.Title
+		}
+	}
+	result := make([]DomainVisitSummary, 0, len(agg))
+	for domain, d := range agg {
+		result = append(result, DomainVisitSummary{
+			Domain:   domain,
+			URLs:     len(d.urls),
+			Visits:   d.visits,
+			TotalMs:  d.totalMs,
+			TopTitle: d.topTitle,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Visits > result[j].Visits
+	})
+	return result
+}
+
+func extractDomain(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	return u.Host
 }
 
 type ActivityPeriodKind string
@@ -199,6 +260,29 @@ func FormatHistoryMarkdown(visits []TabVisitSummary, signals []SignalRecord, lab
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Activity: %s\n\n", label)
 
+	// Domain summary section
+	domains := GroupByDomain(visits)
+	fmt.Fprintf(&b, "## By Domain (%d domains)\n\n", len(domains))
+	if len(domains) == 0 {
+		b.WriteString("No tab activity recorded.\n\n")
+	} else {
+		b.WriteString("| Visits | URLs | Time    | Domain                                   | Top Page\n")
+		b.WriteString("|--------|------|---------|------------------------------------------|-------------------------------------------------------------\n")
+		for _, d := range domains {
+			domain := d.Domain
+			if len(domain) > 42 {
+				domain = domain[:39] + "..."
+			}
+			topTitle := d.TopTitle
+			if len(topTitle) > 61 {
+				topTitle = topTitle[:58] + "..."
+			}
+			fmt.Fprintf(&b, "| %6d | %4d | %-7s | %-40s | %s\n",
+				d.Visits, d.URLs, formatDuration(d.TotalMs), domain, topTitle)
+		}
+		b.WriteString("\n")
+	}
+
 	// Tabs section
 	totalPages := len(visits)
 	var totalMs int64
@@ -247,9 +331,19 @@ func FormatHistoryMarkdown(visits []TabVisitSummary, signals []SignalRecord, lab
 
 // HistoryJSONOutput is the JSON representation of the history export.
 type HistoryJSONOutput struct {
-	Label   string             `json:"label"`
-	Tabs    []TabVisitJSONRow  `json:"tabs"`
-	Signals []SignalJSONOutput `json:"signals"`
+	Label   string                `json:"label"`
+	Domains []DomainVisitJSONRow  `json:"domains"`
+	Tabs    []TabVisitJSONRow     `json:"tabs"`
+	Signals []SignalJSONOutput    `json:"signals"`
+}
+
+// DomainVisitJSONRow is one entry in the domains array.
+type DomainVisitJSONRow struct {
+	Domain   string `json:"domain"`
+	URLs     int    `json:"urls"`
+	Visits   int    `json:"visits"`
+	TotalMs  int64  `json:"total_ms"`
+	TopTitle string `json:"top_title"`
 }
 
 // TabVisitJSONRow is one entry in the tabs array.
@@ -265,6 +359,15 @@ type TabVisitJSONRow struct {
 // FormatHistoryJSON renders the activity digest as JSON.
 func FormatHistoryJSON(visits []TabVisitSummary, signals []SignalRecord, label string) (string, error) {
 	out := HistoryJSONOutput{Label: label}
+	for _, d := range GroupByDomain(visits) {
+		out.Domains = append(out.Domains, DomainVisitJSONRow{
+			Domain:   d.Domain,
+			URLs:     d.URLs,
+			Visits:   d.Visits,
+			TotalMs:  d.TotalMs,
+			TopTitle: d.TopTitle,
+		})
+	}
 	for _, v := range visits {
 		out.Tabs = append(out.Tabs, TabVisitJSONRow{
 			URL:       v.URL,

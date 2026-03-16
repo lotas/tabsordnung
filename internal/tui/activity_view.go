@@ -38,9 +38,11 @@ type ActivityView struct {
 	loaded  bool
 	err     error
 
-	selected *storage.ActivityPeriodSummary
-	visits   []storage.TabVisitSummary
-	signals  []storage.SignalRecord
+	selected      *storage.ActivityPeriodSummary
+	visits        []storage.TabVisitSummary
+	signals       []storage.SignalRecord
+	domainSummary []storage.DomainVisitSummary
+	domainMode    bool
 
 	focusDetail bool
 }
@@ -147,6 +149,7 @@ func (v ActivityView) Update(msg tea.Msg) (ActivityView, tea.Cmd) {
 		v.selected = msg.period
 		v.visits = msg.visits
 		v.signals = msg.signals
+		v.domainSummary = storage.GroupByDomain(msg.visits)
 		v.detail.Scroll = 0
 		v.detail.ContentLen = v.computeDetailLineCount()
 		return v, nil
@@ -199,6 +202,10 @@ func (v ActivityView) Update(msg tea.Msg) (ActivityView, tea.Cmd) {
 				v.detail.ScrollDown()
 			case "k", "up", "pgup":
 				v.detail.ScrollUp()
+			case "d":
+				v.domainMode = !v.domainMode
+				v.detail.Scroll = 0
+				v.detail.ContentLen = v.computeDetailLineCount()
 			}
 			return v, nil
 		}
@@ -220,6 +227,10 @@ func (v ActivityView) Update(msg tea.Msg) (ActivityView, tea.Cmd) {
 			if v.selected != nil {
 				v.focusDetail = true
 			}
+		case "d":
+			v.domainMode = !v.domainMode
+			v.detail.Scroll = 0
+			v.detail.ContentLen = v.computeDetailLineCount()
 		case "[":
 			v.kind = prevActivityKind(v.kind)
 			return v, v.LoadPeriods()
@@ -267,12 +278,20 @@ func (v *ActivityView) adjustOffset() {
 }
 
 func (v ActivityView) computeDetailLineCount() int {
-	// Header: "Activity\n", summary line + "\n\n", "Tabs\n" = 4 lines
+	// Header: "Activity\n", summary line + "\n\n", section header "\n" = 4 lines
 	lines := 4
-	if len(v.visits) == 0 {
-		lines++ // "No tab activity recorded.\n"
+	if v.domainMode {
+		if len(v.domainSummary) == 0 {
+			lines++ // "No tab activity recorded.\n"
+		} else {
+			lines += len(v.domainSummary) // one line per domain
+		}
 	} else {
-		lines += 2 * len(v.visits) // title + url per visit
+		if len(v.visits) == 0 {
+			lines++ // "No tab activity recorded.\n"
+		} else {
+			lines += 2 * len(v.visits) // title + url per visit
+		}
 	}
 	// blank + "Signals (N)\n" = 2 lines
 	lines += 2
@@ -352,16 +371,32 @@ func (v ActivityView) ViewDetail() string {
 	b.WriteString(fmt.Sprintf("%s · %d visits · %d pages · %s total\n\n",
 		v.selected.Label, totalVisits, len(v.visits), formatActivityDuration(totalMs)))
 
-	b.WriteString(labelStyle.Render("Tabs") + "\n")
-	if len(v.visits) == 0 {
-		b.WriteString("No tab activity recorded.\n")
+	if v.domainMode {
+		b.WriteString(labelStyle.Render(fmt.Sprintf("Domains (%d)", len(v.domainSummary))) + "\n")
+		if len(v.domainSummary) == 0 {
+			b.WriteString("No tab activity recorded.\n")
+		} else {
+			for _, d := range v.domainSummary {
+				domainWidth := max(v.detail.Width/3, 16)
+				domain := truncateString(d.Domain, domainWidth)
+				topWidth := max(v.detail.Width-domainWidth-30, 12)
+				top := truncateString(d.TopTitle, topWidth)
+				b.WriteString(fmt.Sprintf("%4d  %3d urls  %-7s  %-*s  %s\n",
+					d.Visits, d.URLs, formatActivityDuration(d.TotalMs), domainWidth, domain, dimStyle.Render(top)))
+			}
+		}
 	} else {
-		for _, visit := range v.visits {
-			titleWidth := max(v.detail.Width-34, 12)
-			title := truncateString(visit.Title, titleWidth)
-			url := truncateString(visit.URL, max(v.detail.Width-18, 24))
-			b.WriteString(fmt.Sprintf("%4d  %-7s  %s\n", visit.Visits, formatActivityDuration(visit.TotalMs), title))
-			b.WriteString(dimStyle.Render("                 "+url) + "\n")
+		b.WriteString(labelStyle.Render("Tabs") + "\n")
+		if len(v.visits) == 0 {
+			b.WriteString("No tab activity recorded.\n")
+		} else {
+			for _, visit := range v.visits {
+				titleWidth := max(v.detail.Width-34, 12)
+				title := truncateString(visit.Title, titleWidth)
+				url := truncateString(visit.URL, max(v.detail.Width-18, 24))
+				b.WriteString(fmt.Sprintf("%4d  %-7s  %s\n", visit.Visits, formatActivityDuration(visit.TotalMs), title))
+				b.WriteString(dimStyle.Render("                 "+url) + "\n")
+			}
 		}
 	}
 
