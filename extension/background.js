@@ -59,6 +59,7 @@ function connect() {
       // Only forward to popup if the updated tab is the currently active tab
       browser.tabs.query({ active: true, currentWindow: true }).then(([activeTab]) => {
         if (activeTab && activeTab.id === msg.tabId) {
+          updateIcon(msg.tabId);
           browser.runtime.sendMessage({ action: "notes-updated", notes: msg.notes || [] }).catch(() => {});
         }
       });
@@ -185,6 +186,7 @@ browser.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
       pendingPopupRequests.set(noteId, {
         resolve: (msg) => {
           notesCache.set(tab.id, msg.notes || []);
+          updateIcon(tab.id);
         },
       });
       setTimeout(() => {
@@ -218,6 +220,7 @@ browser.tabs.onActivated.addListener(async (activeInfo) => {
       pendingPopupRequests.set(noteId, {
         resolve: (msg) => {
           notesCache.set(tab.id, msg.notes || []);
+          updateIcon(tab.id);
         },
       });
       setTimeout(() => {
@@ -911,10 +914,17 @@ function updateIcon(tabId) {
       browser.action.setBadgeText({ text: "\u2713" });
       browser.action.setBadgeBackgroundColor({ color: "#2ea44f" });
       break;
-    default:
+    default: {
       browser.action.setIcon({ path: { "32": "icons/icon-32.svg" } });
-      browser.action.setBadgeText({ text: "" });
+      const notes = notesCache.get(tabId) || [];
+      if (notes.length > 0) {
+        browser.action.setBadgeText({ text: "\u270e" });
+        browser.action.setBadgeBackgroundColor({ color: "#7c6f9b" });
+      } else {
+        browser.action.setBadgeText({ text: "" });
+      }
       break;
+    }
   }
 }
 
