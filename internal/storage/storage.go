@@ -328,6 +328,20 @@ CREATE INDEX idx_tab_visits_started ON tab_visits(started_at);`,
 		Description: "dedupe tab visits with unique index",
 		SQL:         `CREATE UNIQUE INDEX idx_tab_visits_unique ON tab_visits(tab_id, url, started_at, ended_at);`,
 	},
+	{
+		Version:     13,
+		Description: "create tab_notes table",
+		SQL: `
+CREATE TABLE tab_notes (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    url            TEXT    NOT NULL,
+    body           TEXT    NOT NULL,
+    source         TEXT    NOT NULL DEFAULT 'tui',
+    created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    browser_tab_id INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_tab_notes_url ON tab_notes(url);`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.

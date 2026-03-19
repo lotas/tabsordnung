@@ -224,6 +224,81 @@ func (m *DetailModel) ViewTabWithSignal(tab *types.Tab, signals []storage.Signal
 	return base
 }
 
+// ViewTabWithNotes renders tab info with a list of notes, or the note editor.
+func (m *DetailModel) ViewTabWithNotes(tab *types.Tab, notes []types.Note, editing bool, editor NoteEditor) string {
+	base := m.ViewTab(tab)
+
+	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	sourceStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("62"))
+
+	if editing {
+		base += "\n" + editor.View()
+		return base
+	}
+
+	if len(notes) > 0 {
+		base += "\n" + labelStyle.Render(fmt.Sprintf("Notes (%d)", len(notes))) + "\n\n"
+
+		for _, n := range notes {
+			age := formatSignalAge(n.CreatedAt)
+			header := dimStyle.Render(age+" · ") + sourceStyle.Render(n.Source)
+			base += header + "\n"
+			for _, line := range strings.Split(n.Body, "\n") {
+				base += wrapLine(line, m.Width-4)
+			}
+			base += "\n"
+		}
+
+		base += dimStyle.Render("  Press 'n' to add a note")
+	} else {
+		base += "\n" + dimStyle.Render("  Press 'n' to add a note")
+	}
+
+	return base
+}
+
+// viewNotesList renders just the notes list section (for appending to other views).
+func (m *DetailModel) viewNotesList(notes []types.Note) string {
+	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	sourceStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("62"))
+
+	var b strings.Builder
+	b.WriteString(labelStyle.Render(fmt.Sprintf("Notes (%d)", len(notes))) + "\n\n")
+	for _, n := range notes {
+		age := formatSignalAge(n.CreatedAt)
+		b.WriteString(dimStyle.Render(age+" · ") + sourceStyle.Render(n.Source) + "\n")
+		for _, line := range strings.Split(n.Body, "\n") {
+			b.WriteString(wrapLine(line, m.Width-4))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString(dimStyle.Render("  Press 'n' to add a note"))
+	return b.String()
+}
+
+// wrapLine wraps a string at rune boundaries to fit within maxWidth characters.
+func wrapLine(line string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return line + "\n"
+	}
+	runes := []rune(line)
+	if len(runes) <= maxWidth {
+		return line + "\n"
+	}
+	var b strings.Builder
+	for len(runes) > 0 {
+		end := maxWidth
+		if end > len(runes) {
+			end = len(runes)
+		}
+		b.WriteString(string(runes[:end]) + "\n")
+		runes = runes[end:]
+	}
+	return b.String()
+}
+
 func formatSignalAge(t time.Time) string {
 	d := time.Since(t)
 	switch {

@@ -22,6 +22,7 @@ let pendingVisitBatch = null; // { id, count }
 let idleState = "active";
 // Per-tab summarize state: "idle" | "pending" | "ready"
 let tabSummarizeState = new Map();
+let notesCache = new Map(); // tabId → [notes]
 
 function connect() {
   if (reconnectTimer) {
@@ -53,6 +54,16 @@ function connect() {
       pending.resolve(msg);
       return;
     }
+    if (msg.action === "notes-updated") {
+      notesCache.set(msg.tabId, msg.notes || []);
+      // Only forward to popup if the updated tab is the currently active tab
+      browser.tabs.query({ active: true, currentWindow: true }).then(([activeTab]) => {
+        if (activeTab && activeTab.id === msg.tabId) {
+          browser.runtime.sendMessage({ action: "notes-updated", notes: msg.notes || [] }).catch(() => {});
+        }
+      });
+      return;
+    }
     handleCommand(msg);
   });
 
@@ -67,6 +78,7 @@ function connect() {
     }
     pendingPopupRequests.clear();
     tabSummarizeState.clear();
+    notesCache.clear();
     browser.action.setBadgeText({ text: "" });
     scheduleReconnect();
   });
@@ -162,9 +174,25 @@ browser.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   // Reset dwell timer if the active tab navigated to a new URL
   if (changeInfo.url && tab.active) {
     tabSummarizeState.delete(tab.id);
+    notesCache.delete(tab.id);
     updateIcon(tab.id);
     startDwellTimer(tab.id, tab.url);
     startVisit(tab.id, changeInfo.url, tab.title);
+    // Prefetch notes for the new URL
+    if (ws?.readyState === WebSocket.OPEN) {
+      const noteId = nextPopupCmdID();
+      send({ type: "note.list", id: noteId, tabId: tab.id, url: tab.url });
+      pendingPopupRequests.set(noteId, {
+        resolve: (msg) => {
+          notesCache.set(tab.id, msg.notes || []);
+        },
+      });
+      setTimeout(() => {
+        if (pendingPopupRequests.has(noteId)) {
+          pendingPopupRequests.delete(noteId);
+        }
+      }, 5000);
+    }
   }
 });
 
@@ -183,6 +211,21 @@ browser.tabs.onActivated.addListener(async (activeInfo) => {
     updateIcon(tab.id);
     startDwellTimer(tab.id, tab.url);
     startVisit(tab.id, tab.url, tab.title);
+    // Prefetch notes for the newly active tab
+    if (ws?.readyState === WebSocket.OPEN) {
+      const noteId = nextPopupCmdID();
+      send({ type: "note.list", id: noteId, tabId: tab.id, url: tab.url });
+      pendingPopupRequests.set(noteId, {
+        resolve: (msg) => {
+          notesCache.set(tab.id, msg.notes || []);
+        },
+      });
+      setTimeout(() => {
+        if (pendingPopupRequests.has(noteId)) {
+          pendingPopupRequests.delete(noteId);
+        }
+      }, 5000);
+    }
   } catch (e) {
     clearDwellTimer();
   }
@@ -466,6 +509,12 @@ browser.runtime.onMessage.addListener((message, _sender) => {
   if (message.action === "summarize-thread") {
     return handleSummarizeThread(message.channelId, message.threadTs);
   }
+  if (message.action === "get-notes") {
+    return handleGetNotes();
+  }
+  if (message.action === "create-note") {
+    return handleCreateNote(message.body);
+  }
   return false;
 });
 
@@ -610,6 +659,46 @@ async function handleDetectThread() {
       },
     });
   });
+}
+
+async function handleGetNotes() {
+  const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab) return { notes: [] };
+
+  const cached = notesCache.get(activeTab.id);
+  if (cached) return { notes: cached };
+
+  if (!ws || ws.readyState !== WebSocket.OPEN) return { notes: [] };
+
+  const id = nextPopupCmdID();
+  send({ type: "note.list", id, tabId: activeTab.id, url: activeTab.url });
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingPopupRequests.delete(id);
+      resolve({ notes: [] });
+    }, 5000);
+
+    pendingPopupRequests.set(id, {
+      resolve: (msg) => {
+        clearTimeout(timeout);
+        const notes = msg.notes || [];
+        notesCache.set(activeTab.id, notes);
+        resolve({ notes });
+      },
+    });
+  });
+}
+
+async function handleCreateNote(body) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return { ok: false, error: "Not connected" };
+
+  const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab) return { ok: false, error: "No active tab" };
+
+  send({ type: "note.create", tabId: activeTab.id, url: activeTab.url, body });
+
+  return { ok: true };
 }
 
 async function handleSummarizeThread(channelId, threadTs) {

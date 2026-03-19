@@ -72,6 +72,9 @@ function renderTabInfo(data) {
   $("#summarize-btn").classList.remove("hidden");
   $("#summarize-btn").addEventListener("click", () => summarizeTab());
 
+  // Notes
+  renderNotes(data.notes || []);
+
   // Signals
   if (data.signalSource && data.signals && data.signals.length > 0) {
     $("#signals-section").classList.remove("hidden");
@@ -205,7 +208,91 @@ async function summarizeThread() {
   }
 }
 
+function makeNoteMeta(ageText, sourceText) {
+  const meta = document.createElement("div");
+  meta.className = "note-meta";
+  meta.appendChild(document.createTextNode(ageText + " · "));
+  const sourceSpan = document.createElement("span");
+  sourceSpan.className = "note-source";
+  sourceSpan.textContent = sourceText;
+  meta.appendChild(sourceSpan);
+  return meta;
+}
+
+function renderNotes(notes) {
+  const section = $("#notes-section");
+  section.classList.remove("hidden");
+  const list = $("#notes-list");
+  list.innerHTML = "";
+
+  for (const note of notes) {
+    const li = document.createElement("li");
+    const body = document.createElement("div");
+    body.className = "note-body";
+    body.textContent = note.body;
+    li.appendChild(body);
+    li.appendChild(makeNoteMeta(formatAge(note.createdAt), note.source));
+    list.appendChild(li);
+  }
+
+  // Wire up buttons only once; replace elements to remove old listeners
+  const addBtn = $("#add-note-btn");
+  const newAddBtn = addBtn.cloneNode(true);
+  addBtn.parentNode.replaceChild(newAddBtn, addBtn);
+
+  const cancelBtn = $("#note-cancel-btn");
+  const newCancelBtn = cancelBtn.cloneNode(true);
+  cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
+
+  const submitBtn = $("#note-submit-btn");
+  const newSubmitBtn = submitBtn.cloneNode(true);
+  submitBtn.parentNode.replaceChild(newSubmitBtn, submitBtn);
+
+  const inputContainer = $("#note-input-container");
+  const input = $("#note-input");
+
+  newAddBtn.addEventListener("click", () => {
+    newAddBtn.classList.add("hidden");
+    inputContainer.classList.remove("hidden");
+    input.focus();
+  });
+
+  newCancelBtn.addEventListener("click", () => {
+    input.value = "";
+    inputContainer.classList.add("hidden");
+    newAddBtn.classList.remove("hidden");
+  });
+
+  newSubmitBtn.addEventListener("click", async () => {
+    const body = input.value.trim();
+    if (!body) return;
+    newSubmitBtn.disabled = true;
+    const response = await browser.runtime.sendMessage({ action: "create-note", body });
+    newSubmitBtn.disabled = false;
+    if (response && response.ok) {
+      input.value = "";
+      inputContainer.classList.add("hidden");
+      newAddBtn.classList.remove("hidden");
+      // notes-updated push from TUI will re-render the list
+    }
+  });
+}
+
+function formatAge(isoDate) {
+  if (!isoDate) return "";
+  const diff = Date.now() - new Date(isoDate).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return mins + "m ago";
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + "h ago";
+  const days = Math.floor(hours / 24);
+  return days + "d ago";
+}
+
 browser.runtime.onMessage.addListener((message) => {
+  if (message.action === "notes-updated" && message.notes) {
+    renderNotes(message.notes);
+  }
   if (message.action === "summary-ready" && message.summary) {
     $("#summary-spinner").classList.add("hidden");
     $("#summary-none").classList.add("hidden");

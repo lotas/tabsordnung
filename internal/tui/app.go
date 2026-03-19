@@ -113,6 +113,16 @@ type wsSummarizeThreadMsg struct {
 	channelID string
 	threadTS  string
 }
+type wsNoteCreateMsg struct {
+	tabID int
+	url   string
+	body  string
+}
+type wsNoteListMsg struct {
+	id    string
+	tabID int
+	url   string
+}
 type summarizeThreadCompleteMsg struct {
 	channelID    string
 	threadTS     string
@@ -216,6 +226,9 @@ type Model struct {
 
 	// Thread summarization
 	threadSummarizeJobs map[string]*ThreadSummarizeJob // key: channelID/threadTS
+
+	// Input mode: bypass global shortcuts when editing (note editor, etc.)
+	inputMode bool
 
 	// Debounced rebuild
 	rebuildDirty     bool
@@ -582,6 +595,10 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 				return wsGetThreadSummaryMsg{id: msg.ID, channelID: msg.ChannelID, threadTS: msg.ThreadTS}
 			case "summarize-thread":
 				return wsSummarizeThreadMsg{id: msg.ID, tabID: msg.TabID, channelID: msg.ChannelID, threadTS: msg.ThreadTS}
+			case "note.create":
+				return wsNoteCreateMsg{tabID: msg.TabID, url: msg.URL, body: msg.Body}
+			case "note.list":
+				return wsNoteListMsg{id: msg.ID, tabID: msg.TabID, url: msg.URL}
 			default:
 				if msg.ID != "" && msg.OK != nil {
 					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error, content: msg.Content, items: msg.Items}
@@ -625,6 +642,7 @@ func (m *Model) doRebuild() {
 	analyzer.AnalyzeDuplicates(m.session.AllTabs)
 	m.tabsView.stats = analyzer.ComputeStats(m.session)
 	m.tabsView.RebuildTree()
+	m.tabsView.tree.NoteCounts, _ = storage.NoteCountsByURL(m.db)
 	m.rebuildDirty = false
 	m.rebuildScheduled = false
 }
@@ -649,6 +667,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// When in input mode (note editor, etc.), bypass all global shortcuts.
+		if m.inputMode {
+			switch m.activeView {
+			case ViewTabs:
+				v, cmd := m.tabsView.Update(msg)
+				m.tabsView = v
+				if !v.noteEditing {
+					m.inputMode = false
+				}
+				return m, cmd
+			}
+		}
+
 		// View switching and global keys (when no modal)
 		if !m.showPicker && !m.showGroupPicker && !m.showFilterPicker {
 			switch msg.String() {
@@ -727,6 +758,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ViewTabs:
 			v, cmd := m.tabsView.Update(msg)
 			m.tabsView = v
+			if v.noteEditing {
+				m.inputMode = true
+			}
 			return m, cmd
 
 		case ViewSignals:
@@ -848,6 +882,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		return m, loadSession(m.profile)
 
+	case noteSubmitMsg:
+		m.inputMode = false
+		if m.db != nil && m.tabsView.noteEditing {
+			node := m.tabsView.tree.SelectedNode()
+			if node != nil && node.Tab != nil {
+				tab := node.Tab
+				browserID := tab.BrowserID
+				if _, err := storage.InsertNote(m.db, tab.URL, msg.body, "tui", browserID); err != nil {
+					applog.Error("note.insert", err, "url", tab.URL)
+					m.tabsView.noteEditing = false
+					return m, nil
+				}
+				m.tabsView.refreshNotes()
+				m.tabsView.tree.NoteCounts, _ = storage.NoteCountsByURL(m.db)
+				// Push to extension if connected
+				if m.mode == ModeLive && m.connected && browserID != 0 {
+					notes, _ := storage.ListNotesByTabID(m.db, browserID, tab.URL)
+					var payloads []server.NotePayload
+					for _, n := range notes {
+						payloads = append(payloads, server.NotePayload{
+							ID: n.ID, Body: n.Body, Source: n.Source,
+							CreatedAt: n.CreatedAt.Format(time.RFC3339),
+						})
+					}
+					m.server.Send(server.OutgoingMsg{
+						Action: "notes-updated",
+						TabID:  browserID,
+						Notes:  payloads,
+					})
+				}
+			}
+		}
+		m.tabsView.noteEditing = false
+		return m, nil
+
+	case noteCancelMsg:
+		m.inputMode = false
+		m.tabsView.noteEditing = false
+		return m, nil
+
 	// --- Async results ---
 	case sessionLoadedMsg:
 		m.loading = false
@@ -866,6 +940,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		analyzer.AnalyzeDuplicates(m.session.AllTabs)
 		m.tabsView.stats = analyzer.ComputeStats(m.session)
 		m.tabsView.RebuildTree()
+		m.tabsView.tree.NoteCounts, _ = storage.NoteCountsByURL(m.db)
 
 		activityCmd := m.activityView.LoadPeriods()
 		snapshotsCmd := m.snapshotsView.LoadAll()
@@ -1016,6 +1091,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		analyzer.AnalyzeDuplicates(m.session.AllTabs)
 		m.tabsView.stats = analyzer.ComputeStats(m.session)
 		m.tabsView.RebuildTree()
+		m.tabsView.tree.NoteCounts, _ = storage.NoteCountsByURL(m.db)
 
 		m.tabsView.deadChecking = true
 		m.tabsView.githubChecking = true
@@ -1252,6 +1328,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case wsNoteCreateMsg:
+		if m.db != nil {
+			if _, err := storage.InsertNote(m.db, msg.url, msg.body, "extension", msg.tabID); err != nil {
+				applog.Error("note.insert", err, "url", msg.url)
+				return m, listenWebSocket(m.server)
+			}
+			m.tabsView.refreshNotes()
+			// Push updated notes back to extension
+			notes, _ := storage.ListNotesByTabID(m.db, msg.tabID, msg.url)
+			var payloads []server.NotePayload
+			for _, n := range notes {
+				payloads = append(payloads, server.NotePayload{
+					ID: n.ID, Body: n.Body, Source: n.Source,
+					CreatedAt: n.CreatedAt.Format(time.RFC3339),
+				})
+			}
+			m.server.Send(server.OutgoingMsg{
+				Action: "notes-updated",
+				TabID:  msg.tabID,
+				Notes:  payloads,
+			})
+			// Refresh note counts for tree indicator
+			m.tabsView.tree.NoteCounts, _ = storage.NoteCountsByURL(m.db)
+		}
+		return m, listenWebSocket(m.server)
+
+	case wsNoteListMsg:
+		var payloads []server.NotePayload
+		if m.db != nil {
+			notes, _ := storage.ListNotesByTabID(m.db, msg.tabID, msg.url)
+			for _, n := range notes {
+				payloads = append(payloads, server.NotePayload{
+					ID: n.ID, Body: n.Body, Source: n.Source,
+					CreatedAt: n.CreatedAt.Format(time.RFC3339),
+				})
+			}
+		}
+		m.server.Send(server.OutgoingMsg{
+			ID:     msg.id,
+			Action: "note-list",
+			Notes:  payloads,
+		})
+		return m, listenWebSocket(m.server)
 
 	case wsCmdResponseMsg:
 		applog.Info("tui.cmdResponse", "id", msg.id, "ok", msg.ok)
@@ -1711,6 +1831,15 @@ func (m *Model) buildTabInfoPayload(browserID int) *server.TabInfoPayload {
 					Active:   s.CompletedAt == nil,
 				})
 			}
+		}
+	}
+	if m.db != nil {
+		notes, _ := storage.ListNotesByTabID(m.db, browserID, tab.URL)
+		for _, n := range notes {
+			payload.Notes = append(payload.Notes, server.NotePayload{
+				ID: n.ID, Body: n.Body, Source: n.Source,
+				CreatedAt: n.CreatedAt.Format(time.RFC3339),
+			})
 		}
 	}
 	return payload

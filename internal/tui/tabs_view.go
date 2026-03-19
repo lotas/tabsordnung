@@ -39,6 +39,11 @@ type TabsView struct {
 	signalActive *SignalJob
 	signalErrors map[string]string
 
+	// Notes
+	notes       []types.Note
+	noteEditing bool
+	noteEditor  NoteEditor
+
 	// Summarization pipeline
 	summarizeJobs   map[string]*SummarizeJob
 	summarizeErrors map[string]string
@@ -175,6 +180,19 @@ func (v *TabsView) refreshSignals() {
 	}
 }
 
+func (v *TabsView) refreshNotes() {
+	node := v.tree.SelectedNode()
+	if node == nil || node.Tab == nil || v.db == nil {
+		v.notes = nil
+		return
+	}
+	if v.mode == ModeLive && node.Tab.BrowserID != 0 {
+		v.notes, _ = storage.ListNotesByTabID(v.db, node.Tab.BrowserID, node.Tab.URL)
+	} else {
+		v.notes, _ = storage.ListNotesByURL(v.db, node.Tab.URL)
+	}
+}
+
 func (v *TabsView) scrollDetailToSignalCursor() {
 	headerLines := 10
 	cursorLine := headerLines + v.signalCursor
@@ -244,6 +262,7 @@ func (v *TabsView) RebuildTree() {
 	v.tree.Cursor = oldCursor
 	v.tree.Offset = oldOffset
 	v.refreshSignals()
+	v.refreshNotes()
 }
 
 // --- Update method ---
@@ -263,6 +282,7 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 				v.tree.MoveUp()
 				v.detail.Scroll = 0
 				v.refreshSignals()
+				v.refreshNotes()
 			}
 		case tea.MouseButtonWheelDown:
 			if onDetail {
@@ -271,11 +291,19 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 				v.tree.MoveDown()
 				v.detail.Scroll = 0
 				v.refreshSignals()
+				v.refreshNotes()
 			}
 		}
 		return v, nil
 
 	case tea.KeyMsg:
+		// Note editor eats ALL keys (including tab) when active
+		if v.noteEditing && v.focusDetail {
+			e, cmd := v.noteEditor.Update(msg)
+			v.noteEditor = e
+			return v, cmd
+		}
+
 		// Tab toggles pane focus
 		switch msg.String() {
 		case "tab", "shift+tab":
@@ -293,6 +321,7 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 
 		// Detail pane focus mode
 		if v.focusDetail {
+
 			if v.signalSource != "" && len(v.signals) > 0 {
 				switch msg.String() {
 				case "j", "down":
@@ -332,8 +361,8 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 					v.focusDetail = false
 					v.detail.Scroll = 0
 					return v, nil
-				case "c":
-					// Fall through to main 'c' handler
+				case "c", "n":
+					// Fall through to main handler
 				default:
 					return v, nil
 				}
@@ -349,7 +378,7 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 				case "k", "up":
 					v.detail.ScrollUp()
 					return v, nil
-				case "s":
+				case "s", "n":
 					// fall through to main handler
 				default:
 					return v, nil
@@ -362,9 +391,11 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 		case "up", "k":
 			v.tree.MoveUp()
 			v.refreshSignals()
+			v.refreshNotes()
 		case "down", "j":
 			v.tree.MoveDown()
 			v.refreshSignals()
+			v.refreshNotes()
 		case "enter":
 			if v.mode == ModeLive && v.connected {
 				node := v.tree.SelectedNode()
@@ -434,6 +465,14 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 			job := &SignalJob{Tab: node.Tab, Source: source}
 			v.signalQueue = append(v.signalQueue, job)
 			return v, v.processNextSignal()
+		case "n":
+			node := v.tree.SelectedNode()
+			if node != nil && node.Tab != nil {
+				detailWidth := v.width - (v.width * TreeWidthPct / 100) - 4
+				v.noteEditing = true
+				v.noteEditor = NewNoteEditor(detailWidth, v.detail.Height)
+				v.focusDetail = true
+			}
 		case "t":
 			v.tree.CycleDisplayMode()
 		case "f":
@@ -470,6 +509,7 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 			}
 			v.tree.MoveDown()
 			v.refreshSignals()
+			v.refreshNotes()
 		case "g":
 			if v.mode != ModeLive || !v.connected || v.session == nil {
 				return v, nil
@@ -515,7 +555,9 @@ func (v TabsView) ViewDetail() string {
 	var detailContent string
 
 	if node.Tab != nil {
-		if v.signalSource != "" {
+		if v.noteEditing {
+			detailContent = v.detail.ViewTabWithNotes(node.Tab, v.notes, true, v.noteEditor)
+		} else if v.signalSource != "" {
 			isCapturing := v.signalActive != nil && v.signalActive.Source == v.signalSource
 			if !isCapturing {
 				for _, j := range v.signalQueue {
@@ -527,6 +569,9 @@ func (v TabsView) ViewDetail() string {
 			}
 			sigErr := v.signalErrors[v.signalSource]
 			detailContent = v.detail.ViewTabWithSignal(node.Tab, v.signals, v.signalCursor, isCapturing, sigErr)
+			if len(v.notes) > 0 {
+				detailContent += "\n" + v.detail.viewNotesList(v.notes)
+			}
 		} else {
 			var summaryText string
 			sumPath := summarize.SummaryPath(v.summaryDir, node.Tab.URL, node.Tab.Title)
@@ -544,6 +589,10 @@ func (v TabsView) ViewDetail() string {
 			_, isSummarizing := v.summarizeJobs[node.Tab.URL]
 			tabErr := v.summarizeErrors[node.Tab.URL]
 			detailContent = v.detail.ViewTabWithSummary(node.Tab, summaryText, isSummarizing, tabErr)
+			// Append notes below summary if any exist
+			if len(v.notes) > 0 {
+				detailContent += "\n" + v.detail.viewNotesList(v.notes)
+			}
 		}
 	} else if node.Group != nil {
 		detailContent = v.detail.ViewGroup(node.Group)
@@ -596,6 +645,6 @@ func (v TabsView) BottomBar() string {
 	filterStr := fmt.Sprintf("[filter: %s]", filterNames[v.tree.Filter])
 	displayNames := []string{"URL", "Title", "Both"}
 	displayStr := fmt.Sprintf("[T: %s]", displayNames[v.tree.DisplayMode])
-	s += "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 f filter \u00b7 t display \u00b7 r refresh \u00b7 1-6 view \u00b7 p source \u00b7 q quit  " + filterStr + " " + displayStr
+	s += "\u2191\u2193/jk navigate \u00b7 tab focus \u00b7 s summarize \u00b7 c signal \u00b7 n note \u00b7 f filter \u00b7 t display \u00b7 r refresh \u00b7 1-6 view \u00b7 p source \u00b7 q quit  " + filterStr + " " + displayStr
 	return s
 }

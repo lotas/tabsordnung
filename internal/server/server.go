@@ -28,6 +28,7 @@ type IncomingMsg struct {
 	Content   string          `json:"content,omitempty"`
 	Items     string          `json:"items,omitempty"`
 	Visits    json.RawMessage `json:"visits,omitempty"`
+	Body      string          `json:"body,omitempty"`
 	Source    string          `json:"source,omitempty"`
 	URL       string          `json:"url,omitempty"`
 	ChannelID string          `json:"channelId,omitempty"`
@@ -51,6 +52,14 @@ type SignalPayload struct {
 	Active   bool   `json:"active"`
 }
 
+// NotePayload is a single note sent over WebSocket.
+type NotePayload struct {
+	ID        int64  `json:"id"`
+	Body      string `json:"body"`
+	Source    string `json:"source"`
+	CreatedAt string `json:"createdAt"`
+}
+
 // TabInfoPayload is the enriched tab info sent to the extension popup.
 type TabInfoPayload struct {
 	URL          string          `json:"url"`
@@ -65,6 +74,7 @@ type TabInfoPayload struct {
 	Summary      string          `json:"summary,omitempty"`
 	Signals      []SignalPayload `json:"signals,omitempty"`
 	SignalSource string          `json:"signalSource,omitempty"`
+	Notes        []NotePayload   `json:"notes,omitempty"`
 }
 
 // OutgoingMsg is a command from the TUI to the extension.
@@ -84,6 +94,7 @@ type OutgoingMsg struct {
 	Summary string          `json:"summary,omitempty"`
 	Error   string          `json:"error,omitempty"`
 	Status  string          `json:"status,omitempty"`
+	Notes   []NotePayload   `json:"notes,omitempty"`
 }
 
 // Server manages the WebSocket connection to the extension.

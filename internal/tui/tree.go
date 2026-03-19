@@ -27,6 +27,7 @@ type TreeModel struct {
 	SummaryDir       string          // path to summaries directory
 	SignalCounts     map[string]int    // source -> active signal count
 	SignalUrgency    map[string]string // source -> highest urgency
+	NoteCounts       map[string]int    // URL -> note count
 	Cursor           int
 	Offset           int // scroll offset
 	Width            int
@@ -352,6 +353,10 @@ func (m TreeModel) View() string {
 					}
 					markers = append(markers, style.Render(fmt.Sprintf("⚡%d", n)))
 				}
+			}
+
+			if n := m.NoteCounts[node.Tab.URL]; n > 0 {
+				markers = append(markers, lipgloss.NewStyle().Foreground(lipgloss.Color("183")).Render("✎"))
 			}
 
 			marker := ""
