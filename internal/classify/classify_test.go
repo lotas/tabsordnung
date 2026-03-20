@@ -68,6 +68,9 @@ func TestClassifyGmailHeuristic(t *testing.T) {
 		{"snyk sender", "Snyk via taskcluster", "Vulnerability alert", "", "fyi", true},
 		{"resolved bug", "bugzilla-daemon", "Bug status", "Status NEW RESOLVED Comment", "fyi", true},
 		{"fixed bug", "bugzilla-daemon", "Bug update", "Resolution --- FIXED Status", "fyi", true},
+		{"secure bug", "bugzilla-daemon", "New Secure Bug", "Bug 1234 filed as secure bug", "urgent", true},
+		{"needinfo requested", "bugzilla-daemon", "Needinfo Requested", "needinfo requested from you", "urgent", true},
+		{"secure bug in snippet", "bugzilla-daemon", "Bug update", "This is a secure bug report", "urgent", true},
 		{"human PR comment", "Matt", "feat(generic-worker): support capacity", "", "", false},
 		{"human review", "Johan Lorenzo", "Urls pointing to indexes", "", "", false},
 	}

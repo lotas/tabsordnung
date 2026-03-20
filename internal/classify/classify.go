@@ -37,9 +37,27 @@ var senderHeuristicPatterns = []string{
 	"snyk",
 }
 
-// ClassifyGmailHeuristic returns "fyi" for automated/bulk Gmail signals
+// bugzillaUrgentPatterns are case-insensitive substrings in preview/snippet
+// that indicate high-priority Bugzilla emails → urgent without LLM.
+var bugzillaUrgentPatterns = []string{
+	"secure bug",
+	"needinfo requested",
+}
+
+// ClassifyGmailHeuristic returns a classification for Gmail signals
 // based on sender name patterns and content keywords, skipping the LLM.
 func ClassifyGmailHeuristic(title, preview, snippet string) (string, bool) {
+	combined := preview + " " + snippet
+	combinedLower := strings.ToLower(combined)
+
+	// Bugzilla high-priority signals
+	for _, pat := range bugzillaUrgentPatterns {
+		if strings.Contains(combinedLower, pat) {
+			return "urgent", true
+		}
+	}
+
+	// Automated/bulk sender patterns → fyi
 	lower := strings.ToLower(title)
 	for _, pat := range senderHeuristicPatterns {
 		if strings.Contains(lower, pat) {
@@ -47,7 +65,6 @@ func ClassifyGmailHeuristic(title, preview, snippet string) (string, bool) {
 		}
 	}
 	// Bug tracker status changes already resolved
-	combined := preview + " " + snippet
 	if strings.Contains(combined, "RESOLVED") || strings.Contains(combined, "FIXED") {
 		return "fyi", true
 	}
