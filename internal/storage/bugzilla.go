@@ -437,7 +437,7 @@ func BackfillBugzillaEntities(db *sql.DB) (int, error) {
 	}
 	rows.Close()
 
-	signals, err := ListSignals(db, "", true)
+	signals, err := ListSignals(db, "", "", true)
 	if err != nil {
 		return 0, fmt.Errorf("list signals for backfill: %w", err)
 	}

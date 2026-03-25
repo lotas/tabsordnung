@@ -433,7 +433,7 @@ func TestExtractGitHubFromSignals(t *testing.T) {
 		CapturedAt: now,
 	})
 
-	signals, _ := ListSignals(db, "", false)
+	signals, _ := ListSignals(db, "", "", false)
 	count, err := ExtractGitHubFromSignals(db, signals)
 	if err != nil {
 		t.Fatalf("ExtractGitHubFromSignals: %v", err)

@@ -17,12 +17,14 @@ type signalsViewLoadedMsg struct {
 
 // signalNode represents a row in the signals tree.
 type signalNode struct {
-	IsHeader       bool   // true for source/section headers
-	Header         string // e.g. "Gmail (3 active)" or "Completed (5)"
-	Signal         *storage.SignalRecord
-	Source         string  // source name (set on headers and their children)
-	IsCompleted    bool    // true for the "Completed" section header
-	HighestUrgency *string // for headers: most urgent signal in this source
+	IsHeader        bool   // true for source/account/section headers
+	IsAccountHeader bool   // true for account-level sub-headers
+	Header          string // e.g. "Gmail (3 active)" or "work@co.com (2 active)"
+	Signal          *storage.SignalRecord
+	Source          string  // source name (set on all node types)
+	Account         string  // account name (set on account headers and signal items)
+	IsCompleted     bool    // true for the "Completed" section header
+	HighestUrgency  *string // for headers: most urgent signal in this group
 }
 
 type SignalsView struct {
@@ -56,7 +58,7 @@ func (v *SignalsView) Reload() tea.Cmd {
 	v.loading = true
 	db := v.db
 	return func() tea.Msg {
-		signals, err := storage.ListSignals(db, "", true)
+		signals, err := storage.ListSignals(db, "", "", true)
 		return signalsViewLoadedMsg{signals: signals, err: err}
 	}
 }
@@ -96,10 +98,15 @@ func highestUrgency(signals []*storage.SignalRecord) *string {
 func (v *SignalsView) buildNodes() {
 	v.nodes = nil
 
-	// Group active signals by source
-	type sourceGroup struct {
-		source  string
+	// Group active signals by source, then by account within each source
+	type accountGroup struct {
+		account string
 		signals []*storage.SignalRecord
+	}
+	type sourceGroup struct {
+		source       string
+		accounts     []*accountGroup
+		accountIndex map[string]*accountGroup
 	}
 	sourceMap := make(map[string]*sourceGroup)
 	var sourceOrder []string
@@ -111,33 +118,81 @@ func (v *SignalsView) buildNodes() {
 			completed = append(completed, s)
 			continue
 		}
-		if _, ok := sourceMap[s.Source]; !ok {
-			sourceMap[s.Source] = &sourceGroup{source: s.Source}
+		sg, ok := sourceMap[s.Source]
+		if !ok {
+			sg = &sourceGroup{source: s.Source, accountIndex: make(map[string]*accountGroup)}
+			sourceMap[s.Source] = sg
 			sourceOrder = append(sourceOrder, s.Source)
 		}
-		sourceMap[s.Source].signals = append(sourceMap[s.Source].signals, s)
+		ag, ok := sg.accountIndex[s.Account]
+		if !ok {
+			ag = &accountGroup{account: s.Account}
+			sg.accounts = append(sg.accounts, ag)
+			sg.accountIndex[s.Account] = ag
+		}
+		ag.signals = append(ag.signals, s)
 	}
 
 	// Active sources
 	for _, src := range sourceOrder {
 		sg := sourceMap[src]
-		if _, ok := v.sourceExpanded[src]; !ok {
-			v.sourceExpanded[src] = true
+		sourceKey := src
+		if _, ok := v.sourceExpanded[sourceKey]; !ok {
+			v.sourceExpanded[sourceKey] = true
 		}
+
+		// Count total active signals for this source
+		totalActive := 0
+		var allSignals []*storage.SignalRecord
+		for _, ag := range sg.accounts {
+			totalActive += len(ag.signals)
+			allSignals = append(allSignals, ag.signals...)
+		}
+
 		icon := "▸"
-		if v.sourceExpanded[src] {
+		if v.sourceExpanded[sourceKey] {
 			icon = "▼"
 		}
-		highest := highestUrgency(sg.signals)
+		highest := highestUrgency(allSignals)
 		v.nodes = append(v.nodes, signalNode{
 			IsHeader:       true,
-			Header:         fmt.Sprintf("%s %s (%d active)", icon, sg.source, len(sg.signals)),
-			Source:          src,
+			Header:         fmt.Sprintf("%s %s (%d active)", icon, sg.source, totalActive),
+			Source:         src,
 			HighestUrgency: highest,
 		})
-		if v.sourceExpanded[src] {
-			for _, s := range sg.signals {
-				v.nodes = append(v.nodes, signalNode{Signal: s, Source: src})
+
+		if !v.sourceExpanded[sourceKey] {
+			continue
+		}
+
+		for _, ag := range sg.accounts {
+			acctKey := src + "\x00" + ag.account
+			if _, ok := v.sourceExpanded[acctKey]; !ok {
+				v.sourceExpanded[acctKey] = true
+			}
+
+			acctIcon := "  ▸"
+			if v.sourceExpanded[acctKey] {
+				acctIcon = "  ▼"
+			}
+			acctLabel := ag.account
+			if acctLabel == "" {
+				acctLabel = "(default)"
+			}
+			acctHighest := highestUrgency(ag.signals)
+			v.nodes = append(v.nodes, signalNode{
+				IsHeader:        true,
+				IsAccountHeader: true,
+				Header:          fmt.Sprintf("%s %s (%d active)", acctIcon, acctLabel, len(ag.signals)),
+				Source:          src,
+				Account:         ag.account,
+				HighestUrgency:  acctHighest,
+			})
+
+			if v.sourceExpanded[acctKey] {
+				for _, s := range ag.signals {
+					v.nodes = append(v.nodes, signalNode{Signal: s, Source: src, Account: ag.account})
+				}
 			}
 		}
 	}
@@ -283,7 +338,7 @@ func (v SignalsView) Update(msg tea.Msg) (SignalsView, tea.Cmd) {
 				sig := v.selectedSignal()
 				if sig != nil {
 					return v, func() tea.Msg {
-						return signalNavigateMsg{Source: sig.Source, Title: sig.Title}
+						return signalNavigateMsg{Source: sig.Source, Account: sig.Account, Title: sig.Title}
 					}
 				}
 				v.focusDetail = true
@@ -317,11 +372,19 @@ func (v SignalsView) Update(msg tea.Msg) (SignalsView, tea.Cmd) {
 	return v, nil
 }
 
+func (v *SignalsView) expandKey(node signalNode) string {
+	if node.IsAccountHeader {
+		return node.Source + "\x00" + node.Account
+	}
+	return node.Source
+}
+
 func (v *SignalsView) toggleHeader(node signalNode) {
 	if node.IsCompleted {
 		v.completedExpanded = !v.completedExpanded
-	} else if node.Source != "" {
-		v.sourceExpanded[node.Source] = !v.sourceExpanded[node.Source]
+	} else {
+		key := v.expandKey(node)
+		v.sourceExpanded[key] = !v.sourceExpanded[key]
 	}
 }
 
@@ -329,7 +392,7 @@ func (v *SignalsView) isExpanded(node signalNode) bool {
 	if node.IsCompleted {
 		return v.completedExpanded
 	}
-	return v.sourceExpanded[node.Source]
+	return v.sourceExpanded[v.expandKey(node)]
 }
 
 func (v *SignalsView) adjustOffset() {
@@ -402,7 +465,7 @@ func (v SignalsView) ViewList() string {
 				}
 			}
 
-			text := fmt.Sprintf("  %s%s", urgencyPrefix, s.Title)
+			text := fmt.Sprintf("    %s%s", urgencyPrefix, s.Title)
 			if s.Preview != "" {
 				text += " — " + s.Preview
 			}
@@ -415,7 +478,7 @@ func (v SignalsView) ViewList() string {
 			line = text + suffix
 
 			if s.CompletedAt != nil {
-				line = completedStyle.Render("  ✓ " + line[2:])
+				line = completedStyle.Render("    ✓ " + line[4:])
 			}
 		}
 
@@ -451,7 +514,11 @@ func (v SignalsView) ViewDetail() string {
 	var b strings.Builder
 
 	b.WriteString(labelStyle.Render("Source") + "\n")
-	b.WriteString(valueStyle.Render(sig.Source) + "\n\n")
+	sourceVal := sig.Source
+	if sig.Account != "" {
+		sourceVal += " / " + sig.Account
+	}
+	b.WriteString(valueStyle.Render(sourceVal) + "\n\n")
 
 	b.WriteString(labelStyle.Render("Title") + "\n")
 	b.WriteString(valueStyle.Render(sig.Title) + "\n\n")

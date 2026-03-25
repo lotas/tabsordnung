@@ -543,16 +543,16 @@ func TestReconcileSignals_HeuristicUrgency(t *testing.T) {
 		{Title: "#random", Preview: "unread", Kind: "channel"},
 		{Title: "Bob", Preview: "Project update", Kind: ""}, // gmail, no kind
 	}
-	err := ReconcileSignals(db, "slack", items[:3], now)
+	err := ReconcileSignals(db, "slack", "", items[:3], now)
 	if err != nil {
 		t.Fatalf("ReconcileSignals slack: %v", err)
 	}
-	err = ReconcileSignals(db, "gmail", items[3:], now)
+	err = ReconcileSignals(db, "gmail", "", items[3:], now)
 	if err != nil {
 		t.Fatalf("ReconcileSignals gmail: %v", err)
 	}
 
-	sigs, _ := ListSignals(db, "", false)
+	sigs, _ := ListSignals(db, "", "", false)
 
 	urgencies := make(map[string]*string)
 	for _, s := range sigs {

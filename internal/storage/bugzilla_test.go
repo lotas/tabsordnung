@@ -131,7 +131,7 @@ func TestExtractBugzillaFromSignals_EmailNotification(t *testing.T) {
 		CapturedAt: now,
 	})
 
-	signals, _ := ListSignals(db, "", false)
+	signals, _ := ListSignals(db, "", "", false)
 	count, err := ExtractBugzillaFromSignals(db, signals)
 	if err != nil {
 		t.Fatalf("ExtractBugzillaFromSignals: %v", err)
@@ -265,7 +265,7 @@ func TestExtractBugzillaFromSignals(t *testing.T) {
 		Source: "slack", Title: "#general", Preview: "no bug", SourceTS: "3:00 PM", CapturedAt: now,
 	})
 
-	signals, _ := ListSignals(db, "", false)
+	signals, _ := ListSignals(db, "", "", false)
 	count, err := ExtractBugzillaFromSignals(db, signals)
 	if err != nil {
 		t.Fatalf("ExtractBugzillaFromSignals: %v", err)

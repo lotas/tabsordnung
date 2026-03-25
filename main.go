@@ -171,7 +171,7 @@ Usage:
   tabsordnung snapshot restore <rev> [--profile X] [--port N]  Restore tabs via live mode
 
   tabsordnung signals                                    List active signals
-  tabsordnung signals list [--all] [--json] [--source X] List signals
+  tabsordnung signals list [--all] [--json] [--source X] [--account X] List signals
   tabsordnung signals complete <id>                      Mark signal as completed
   tabsordnung signals reopen <id>                        Reopen a completed signal
 
@@ -807,6 +807,7 @@ func runSignalsList(args []string) {
 	showAll := fs.Bool("all", false, "Include completed signals")
 	jsonFlag := fs.Bool("json", false, "Output as JSON")
 	source := fs.String("source", "", "Filter by source (gmail, slack, matrix)")
+	account := fs.String("account", "", "Filter by account")
 	fs.Parse(args)
 
 	db, err := openDB()
@@ -816,7 +817,7 @@ func runSignalsList(args []string) {
 	}
 	defer db.Close()
 
-	sigs, err := storage.ListSignals(db, *source, *showAll)
+	sigs, err := storage.ListSignals(db, *source, *account, *showAll)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error listing signals: %v\n", err)
 		os.Exit(1)

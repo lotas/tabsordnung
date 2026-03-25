@@ -30,6 +30,7 @@ type IncomingMsg struct {
 	Visits    json.RawMessage `json:"visits,omitempty"`
 	Body      string          `json:"body,omitempty"`
 	Source    string          `json:"source,omitempty"`
+	Account   string          `json:"account,omitempty"`
 	URL       string          `json:"url,omitempty"`
 	ChannelID string          `json:"channelId,omitempty"`
 	ThreadTS  string          `json:"threadTs,omitempty"`

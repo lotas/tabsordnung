@@ -411,17 +411,20 @@ async function handleCommand(msg) {
         const scrapers = {
           gmail: () => {
             const rows = document.querySelectorAll("tr.zE");
-            return Array.from(rows).map(row => {
+            const items = Array.from(rows).map(row => {
               const sender = row.querySelector(".zF")?.getAttribute("name") || row.querySelector(".yW")?.textContent?.trim() || "";
               const subject = row.querySelector(".bog span")?.textContent?.trim() || row.querySelector(".y6 span")?.textContent?.trim() || "";
               const snippet = row.querySelector(".xT .y2")?.textContent?.trim() || row.querySelector(".y2")?.textContent?.trim() || "";
               const timestamp = row.querySelector("td.xW span")?.getAttribute("title") || row.querySelector("td.xW span")?.textContent?.trim() || "";
               return { title: sender, preview: subject, snippet, timestamp };
             });
+            const emailEl = document.querySelector('[data-email]');
+            const account = emailEl?.getAttribute('data-email') || '';
+            return { items, account };
           },
           slack: () => {
             const channels = document.querySelectorAll(".p-channel_sidebar__channel--unread");
-            return Array.from(channels).map(el => {
+            const items = Array.from(channels).map(el => {
               const name = el.querySelector(".p-channel_sidebar__name")?.textContent?.trim() || "";
               const badge = el.querySelector('[data-qa="mention_badge"]')?.textContent?.trim() || "";
               const isDM = el.getAttribute("data-qa-channel-sidebar-channel-type") === "im";
@@ -437,6 +440,10 @@ async function handleCommand(msg) {
               else parts.push("unread");
               return { title: name, preview: parts.join(" · "), timestamp: "", kind };
             });
+            const account = document.querySelector('.p-ia4_home_header_menu__team_name')?.textContent?.trim()
+              || document.querySelector('[data-qa="channel-header-team-name"]')?.textContent?.trim()
+              || '';
+            return { items, account };
           },
           matrix: () => {
             const rooms = document.querySelectorAll(".mx_RoomTile");
@@ -460,7 +467,7 @@ async function handleCommand(msg) {
               }
               items.push({ title: name, preview, timestamp: "", kind });
             });
-            return items;
+            return { items, account: location.hostname };
           },
         };
 
@@ -475,8 +482,10 @@ async function handleCommand(msg) {
           func: scraper,
         });
 
-        const items = results?.[0]?.result || [];
-        send({ id: msg.id, ok: true, items: JSON.stringify(items), source: msg.source });
+        const raw = results?.[0]?.result;
+        const items = raw?.items || raw || [];
+        const account = raw?.account || '';
+        send({ id: msg.id, ok: true, items: JSON.stringify(items), source: msg.source, account });
         return;
       }
       default:

@@ -14,6 +14,7 @@ import (
 type SignalRecord struct {
 	ID            int64
 	Source        string
+	Account       string
 	Title         string
 	Preview       string
 	Snippet       string
@@ -50,9 +51,9 @@ func InsertSignal(db *sql.DB, sig SignalRecord) error {
 		sourceTS = sig.CapturedAt.Format(time.RFC3339)
 	}
 	_, err := db.Exec(
-		`INSERT OR IGNORE INTO signals (source, title, preview, snippet, kind, source_ts, captured_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		sig.Source, sig.Title, sig.Preview, sig.Snippet, sig.Kind, sourceTS, sig.CapturedAt,
+		`INSERT OR IGNORE INTO signals (source, account, title, preview, snippet, kind, source_ts, captured_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		sig.Source, sig.Account, sig.Title, sig.Preview, sig.Snippet, sig.Kind, sourceTS, sig.CapturedAt,
 	)
 	return err
 }
@@ -60,14 +61,18 @@ func InsertSignal(db *sql.DB, sig SignalRecord) error {
 // ListSignals returns signals. If source is non-empty, filters by source.
 // If includeCompleted is false, only returns active signals (completed_at IS NULL).
 // Results are ordered: active first (newest captured_at first), then completed (newest completed_at first).
-func ListSignals(db *sql.DB, source string, includeCompleted bool) ([]SignalRecord, error) {
-	query := `SELECT id, source, title, preview, snippet, kind, source_ts, captured_at, completed_at, auto_completed, pinned, urgency, urgency_source
+func ListSignals(db *sql.DB, source string, account string, includeCompleted bool) ([]SignalRecord, error) {
+	query := `SELECT id, source, account, title, preview, snippet, kind, source_ts, captured_at, completed_at, auto_completed, pinned, urgency, urgency_source
 		FROM signals WHERE 1=1`
 	var args []interface{}
 
 	if source != "" {
 		query += " AND source = ?"
 		args = append(args, source)
+	}
+	if account != "" {
+		query += " AND account = ?"
+		args = append(args, account)
 	}
 	if !includeCompleted {
 		query += " AND completed_at IS NULL"
@@ -88,7 +93,7 @@ func ListSignals(db *sql.DB, source string, includeCompleted bool) ([]SignalReco
 		var s SignalRecord
 		var completedAt sql.NullTime
 		var urgency, urgencySource sql.NullString
-		if err := rows.Scan(&s.ID, &s.Source, &s.Title, &s.Preview, &s.Snippet, &s.Kind, &s.SourceTS,
+		if err := rows.Scan(&s.ID, &s.Source, &s.Account, &s.Title, &s.Preview, &s.Snippet, &s.Kind, &s.SourceTS,
 			&s.CapturedAt, &completedAt, &s.AutoCompleted, &s.Pinned, &urgency, &urgencySource); err != nil {
 			return nil, err
 		}
@@ -107,6 +112,7 @@ func ListSignals(db *sql.DB, source string, includeCompleted bool) ([]SignalReco
 }
 
 // ActiveSignalCounts returns the number of active (non-completed) signals per source.
+// Counts are aggregated across all accounts for each source.
 func ActiveSignalCounts(db *sql.DB) (map[string]int, error) {
 	rows, err := db.Query(`SELECT source, COUNT(*) FROM signals WHERE completed_at IS NULL GROUP BY source`)
 	if err != nil {
@@ -188,16 +194,16 @@ func ReopenSignal(db *sql.DB, id int64) error {
 // 2. Insert new episodes for scraped items that have no active signal (source_ts = capturedAt for uniqueness)
 // 3. Auto-complete active signals missing from scrape (unless pinned)
 // No reactivation — once completed, a signal stays completed and new unreads create a new episode.
-func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedAt time.Time) error {
+func ReconcileSignals(db *sql.DB, source string, account string, items []SignalRecord, capturedAt time.Time) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	// 1. Query active signals for this source.
+	// 1. Query active signals for this source+account.
 	rows, err := tx.Query(
-		`SELECT id, title, preview FROM signals WHERE source = ? AND completed_at IS NULL`, source)
+		`SELECT id, title, preview FROM signals WHERE source = ? AND account = ? AND completed_at IS NULL`, source, account)
 	if err != nil {
 		return err
 	}
@@ -222,8 +228,8 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 	// 2. Insert new episodes for items without an active signal.
 	tsStr := capturedAt.Format(time.RFC3339)
 	insertStmt, err := tx.Prepare(
-		`INSERT OR IGNORE INTO signals (source, title, preview, snippet, kind, source_ts, captured_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
+		`INSERT OR IGNORE INTO signals (source, account, title, preview, snippet, kind, source_ts, captured_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -242,7 +248,7 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 		if sourceTS == "" {
 			sourceTS = tsStr
 		}
-		if _, err := insertStmt.Exec(source, item.Title, item.Preview, item.Snippet, item.Kind, sourceTS, capturedAt); err != nil {
+		if _, err := insertStmt.Exec(source, account, item.Title, item.Preview, item.Snippet, item.Kind, sourceTS, capturedAt); err != nil {
 			return err
 		}
 		applog.Info("signal.reconcile.insert", "source", source, "title", item.Title, "preview", item.Preview, "action", "new", "sourceTS", sourceTS)
@@ -251,8 +257,8 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 		// Heuristic classification for signals with known kind
 		if urgency, ok := ClassifyByKind(item.Kind); ok {
 			if _, err := tx.Exec(`UPDATE signals SET urgency = ?, urgency_source = 'heuristic'
-				WHERE source = ? AND title = ? AND preview = ? AND source_ts = ? AND urgency IS NULL`,
-				urgency, source, item.Title, item.Preview, sourceTS); err != nil {
+				WHERE source = ? AND account = ? AND title = ? AND preview = ? AND source_ts = ? AND urgency IS NULL`,
+				urgency, source, account, item.Title, item.Preview, sourceTS); err != nil {
 				return err
 			}
 		}
@@ -263,9 +269,9 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 	res, err := tx.Exec(`
 		UPDATE signals
 		SET completed_at = CURRENT_TIMESTAMP, auto_completed = 1
-		WHERE source = ? AND completed_at IS NULL AND pinned = 0
+		WHERE source = ? AND account = ? AND completed_at IS NULL AND pinned = 0
 		  AND (title || char(10) || preview) NOT IN (SELECT value FROM json_each(?))`,
-		source, scrapedJSON)
+		source, account, scrapedJSON)
 	if err != nil {
 		return err
 	}
@@ -281,7 +287,7 @@ func ReconcileSignals(db *sql.DB, source string, items []SignalRecord, capturedA
 
 // ListUnclassifiedSignals returns active signals that have not been classified yet.
 func ListUnclassifiedSignals(db *sql.DB) ([]SignalRecord, error) {
-	rows, err := db.Query(`SELECT id, source, title, preview, snippet, kind, source_ts, captured_at, completed_at, auto_completed, pinned, urgency, urgency_source
+	rows, err := db.Query(`SELECT id, source, account, title, preview, snippet, kind, source_ts, captured_at, completed_at, auto_completed, pinned, urgency, urgency_source
 		FROM signals WHERE urgency IS NULL AND completed_at IS NULL
 		ORDER BY captured_at ASC`)
 	if err != nil {
@@ -294,7 +300,7 @@ func ListUnclassifiedSignals(db *sql.DB) ([]SignalRecord, error) {
 		var s SignalRecord
 		var completedAt sql.NullTime
 		var urgency, urgencySource sql.NullString
-		if err := rows.Scan(&s.ID, &s.Source, &s.Title, &s.Preview, &s.Snippet, &s.Kind, &s.SourceTS,
+		if err := rows.Scan(&s.ID, &s.Source, &s.Account, &s.Title, &s.Preview, &s.Snippet, &s.Kind, &s.SourceTS,
 			&s.CapturedAt, &completedAt, &s.AutoCompleted, &s.Pinned, &urgency, &urgencySource); err != nil {
 			return nil, err
 		}
@@ -337,55 +343,86 @@ func keysToJSON(keys map[string]bool) string {
 	return "[" + strings.Join(parts, ",") + "]"
 }
 
-// FormatSignalsMarkdown formats signals grouped by source as markdown.
+// FormatSignalsMarkdown formats signals grouped by source and account as markdown.
 func FormatSignalsMarkdown(signals []SignalRecord) string {
 	if len(signals) == 0 {
 		return "No signals found.\n"
 	}
 
-	grouped := make(map[string][]SignalRecord)
+	type accountGroup struct {
+		account string
+		signals []SignalRecord
+	}
+	type sourceGroup struct {
+		accounts     []*accountGroup
+		accountIndex map[string]*accountGroup
+	}
+
+	sources := make(map[string]*sourceGroup)
 	var sourceOrder []string
 	for _, s := range signals {
-		if _, exists := grouped[s.Source]; !exists {
+		sg, ok := sources[s.Source]
+		if !ok {
+			sg = &sourceGroup{accountIndex: make(map[string]*accountGroup)}
+			sources[s.Source] = sg
 			sourceOrder = append(sourceOrder, s.Source)
 		}
-		grouped[s.Source] = append(grouped[s.Source], s)
+		ag, ok := sg.accountIndex[s.Account]
+		if !ok {
+			ag = &accountGroup{account: s.Account}
+			sg.accounts = append(sg.accounts, ag)
+			sg.accountIndex[s.Account] = ag
+		}
+		ag.signals = append(ag.signals, s)
 	}
 
 	var b strings.Builder
 	for _, source := range sourceOrder {
-		sigs := grouped[source]
+		sg := sources[source]
 		activeCount := 0
-		for _, s := range sigs {
-			if s.CompletedAt == nil {
-				activeCount++
+		for _, ag := range sg.accounts {
+			for _, s := range ag.signals {
+				if s.CompletedAt == nil {
+					activeCount++
+				}
 			}
 		}
 		fmt.Fprintf(&b, "## %s (%d active)\n\n", capitalize(source), activeCount)
-		for _, s := range sigs {
-			age := formatAge(s.CapturedAt)
-			prefix := fmt.Sprintf("- [%d]", s.ID)
-			if s.CompletedAt != nil {
-				prefix += " ✓"
-			}
-			urgencyTag := "[pending] "
-			if s.Urgency != nil {
-				switch *s.Urgency {
-				case "urgent":
-					urgencyTag = "[urgent] "
-				case "review":
-					urgencyTag = "[review] "
-				case "fyi":
-					urgencyTag = "[fyi] "
+		for _, ag := range sg.accounts {
+			if ag.account != "" {
+				acctActive := 0
+				for _, s := range ag.signals {
+					if s.CompletedAt == nil {
+						acctActive++
+					}
 				}
+				fmt.Fprintf(&b, "### %s (%d active)\n\n", ag.account, acctActive)
 			}
-			if s.Preview != "" {
-				fmt.Fprintf(&b, "%s %s%s — %s (%s)\n", prefix, urgencyTag, s.Title, s.Preview, age)
-			} else {
-				fmt.Fprintf(&b, "%s %s%s (%s)\n", prefix, urgencyTag, s.Title, age)
-			}
-			if s.Snippet != "" {
-				fmt.Fprintf(&b, "  > %s\n", s.Snippet)
+			for _, s := range ag.signals {
+				age := formatAge(s.CapturedAt)
+				prefix := fmt.Sprintf("- [%d]", s.ID)
+				if s.CompletedAt != nil {
+					prefix += " ✓"
+				}
+				urgencyTag := "[pending] "
+				if s.Urgency != nil {
+					switch *s.Urgency {
+					case "urgent":
+						urgencyTag = "[urgent] "
+					case "review":
+						urgencyTag = "[review] "
+					case "fyi":
+						urgencyTag = "[fyi] "
+					}
+				}
+				if s.Preview != "" {
+					fmt.Fprintf(&b, "%s %s%s — %s (%s)\n", prefix, urgencyTag, s.Title, s.Preview, age)
+				} else {
+					fmt.Fprintf(&b, "%s %s%s (%s)\n", prefix, urgencyTag, s.Title, age)
+				}
+				if s.Snippet != "" {
+					fmt.Fprintf(&b, "  > %s\n", s.Snippet)
+				}
 			}
 		}
 		b.WriteString("\n")
@@ -416,6 +453,7 @@ func formatAge(t time.Time) string {
 // SignalJSONOutput is the structure for --json output.
 type SignalJSONOutput struct {
 	ID            int64  `json:"id"`
+	Account       string `json:"account,omitempty"`
 	Title         string `json:"title"`
 	Preview       string `json:"preview"`
 	Snippet       string `json:"snippet,omitempty"`
@@ -432,6 +470,7 @@ func FormatSignalsJSON(signals []SignalRecord) (string, error) {
 	for _, s := range signals {
 		out := SignalJSONOutput{
 			ID:         s.ID,
+			Account:    s.Account,
 			Title:      s.Title,
 			Preview:    s.Preview,
 			Snippet:    s.Snippet,

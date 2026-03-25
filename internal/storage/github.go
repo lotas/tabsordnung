@@ -579,7 +579,7 @@ func BackfillGitHubEntities(db *sql.DB) (int, error) {
 	rows.Close()
 
 	// Scan all signals
-	signals, err := ListSignals(db, "", true) // include completed
+	signals, err := ListSignals(db, "", "", true) // include completed
 	if err != nil {
 		return 0, fmt.Errorf("list signals for backfill: %w", err)
 	}

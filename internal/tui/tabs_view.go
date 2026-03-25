@@ -26,9 +26,12 @@ type TabsView struct {
 	selected    map[int]bool // BrowserID -> selected (live mode multi-select)
 
 	// Signal list in detail pane
-	signals      []storage.SignalRecord
-	signalCursor int
-	signalSource string
+	signals        []storage.SignalRecord
+	signalCursor   int
+	signalSource   string
+	signalAccount  string
+	accountMap     map[string]string // "source\x00urlAccount" → extName
+	accountRevMap  map[string]string // "source\x00extName" → urlAccount
 
 	// Analysis progress
 	deadChecking   bool
@@ -72,6 +75,8 @@ func NewTabsView(srv *server.Server, db *sql.DB, summaryDir, ollamaModel, ollama
 		summarizeJobs:   make(map[string]*SummarizeJob),
 		summarizeErrors: make(map[string]string),
 		signalErrors:    make(map[string]string),
+		accountMap:      make(map[string]string),
+		accountRevMap:   make(map[string]string),
 		server:          srv,
 		db:              db,
 		summaryDir:      summaryDir,
@@ -132,26 +137,29 @@ func (v *TabsView) queueSignalPoll() tea.Cmd {
 		return signalPollTick()
 	}
 
-	sourceTabs := make(map[string]*types.Tab)
+	type sourceKey struct{ source, account string }
+	sourceTabs := make(map[sourceKey]*types.Tab)
 	for _, tab := range v.session.AllTabs {
 		src := signal.DetectSource(tab.URL)
 		if src == "" {
 			continue
 		}
-		if _, ok := sourceTabs[src]; !ok {
-			sourceTabs[src] = tab
+		acct := signal.ExtractAccount(tab.URL)
+		key := sourceKey{src, acct}
+		if _, ok := sourceTabs[key]; !ok {
+			sourceTabs[key] = tab
 		}
 	}
 
 	if v.signalActive != nil {
-		delete(sourceTabs, v.signalActive.Source)
+		delete(sourceTabs, sourceKey{v.signalActive.Source, v.signalActive.Account})
 	}
 	for _, j := range v.signalQueue {
-		delete(sourceTabs, j.Source)
+		delete(sourceTabs, sourceKey{j.Source, j.Account})
 	}
 
-	for src, tab := range sourceTabs {
-		v.signalQueue = append(v.signalQueue, &SignalJob{Tab: tab, Source: src})
+	for key, tab := range sourceTabs {
+		v.signalQueue = append(v.signalQueue, &SignalJob{Tab: tab, Source: key.source, Account: key.account})
 	}
 
 	return tea.Batch(v.processNextSignal(), signalPollTick())
@@ -159,15 +167,23 @@ func (v *TabsView) queueSignalPoll() tea.Cmd {
 
 func (v *TabsView) refreshSignals() {
 	node := v.tree.SelectedNode()
-	var source string
+	var source, account string
 	if node != nil && node.Tab != nil {
 		source = signal.DetectSource(node.Tab.URL)
+		if source != "" {
+			urlAcct := signal.ExtractAccount(node.Tab.URL)
+			account = v.resolveAccountName(source, urlAcct)
+			if account == "" {
+				account = urlAcct
+			}
+		}
 	}
-	if source != v.signalSource {
+	if source != v.signalSource || account != v.signalAccount {
 		v.signalSource = source
+		v.signalAccount = account
 		v.signalCursor = 0
 		if source != "" && v.db != nil {
-			v.signals, _ = storage.ListSignals(v.db, source, true)
+			v.signals, _ = storage.ListSignals(v.db, source, account, true)
 		} else {
 			v.signals = nil
 		}
@@ -216,6 +232,39 @@ func (v *TabsView) findTabForSource(source string) *types.Tab {
 		}
 	}
 	return nil
+}
+
+func (v *TabsView) findTabForSourceAccount(source, account string) *types.Tab {
+	if v.session == nil {
+		return nil
+	}
+	urlAccount := v.resolveAccountID(source, account)
+	for _, tab := range v.session.AllTabs {
+		if signal.DetectSource(tab.URL) != source {
+			continue
+		}
+		tabAcct := signal.ExtractAccount(tab.URL)
+		if tabAcct == account || tabAcct == urlAccount {
+			return tab
+		}
+	}
+	return nil
+}
+
+func (v *TabsView) setAccountMapping(source, urlAccount, extAccount string) {
+	if urlAccount == "" || extAccount == "" || urlAccount == extAccount {
+		return
+	}
+	v.accountMap[source+"\x00"+urlAccount] = extAccount
+	v.accountRevMap[source+"\x00"+extAccount] = urlAccount
+}
+
+func (v *TabsView) resolveAccountName(source, urlAccount string) string {
+	return v.accountMap[source+"\x00"+urlAccount]
+}
+
+func (v *TabsView) resolveAccountID(source, extAccount string) string {
+	return v.accountRevMap[source+"\x00"+extAccount]
 }
 
 func (v *TabsView) RebuildTree() {
@@ -339,7 +388,13 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 				case "enter":
 					if v.mode == ModeLive && v.connected {
 						sig := v.signals[v.signalCursor]
-						tab := v.findTabForSource(v.signalSource)
+						var tab *types.Tab
+						if sig.Account != "" {
+							tab = v.findTabForSourceAccount(v.signalSource, sig.Account)
+						}
+						if tab == nil {
+							tab = v.findTabForSource(v.signalSource)
+						}
 						if tab != nil && tab.BrowserID != 0 {
 							return v, navigateSignalCmd(v.server, tab.BrowserID, v.signalSource, sig.Title)
 						}
@@ -462,7 +517,8 @@ func (v TabsView) Update(msg tea.Msg) (TabsView, tea.Cmd) {
 				break
 			}
 			delete(v.signalErrors, source)
-			job := &SignalJob{Tab: node.Tab, Source: source}
+			account := signal.ExtractAccount(node.Tab.URL)
+			job := &SignalJob{Tab: node.Tab, Source: source, Account: account}
 			v.signalQueue = append(v.signalQueue, job)
 			return v, v.processNextSignal()
 		case "n":

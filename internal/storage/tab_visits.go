@@ -220,7 +220,7 @@ func ListActivityPeriods(db *sql.DB, kind ActivityPeriodKind, loc *time.Location
 // ListSignalsInRange returns signals captured within [from, to).
 func ListSignalsInRange(db *sql.DB, from, to time.Time) ([]SignalRecord, error) {
 	rows, err := db.Query(`
-		SELECT id, source, title, preview, snippet, kind, source_ts, captured_at,
+		SELECT id, source, account, title, preview, snippet, kind, source_ts, captured_at,
 		       completed_at, auto_completed, pinned, urgency, urgency_source
 		FROM signals
 		WHERE captured_at >= ? AND captured_at < ?
@@ -236,7 +236,7 @@ func ListSignalsInRange(db *sql.DB, from, to time.Time) ([]SignalRecord, error) 
 		var s SignalRecord
 		var completedAt sql.NullTime
 		var urgency, urgencySource sql.NullString
-		if err := rows.Scan(&s.ID, &s.Source, &s.Title, &s.Preview, &s.Snippet, &s.Kind,
+		if err := rows.Scan(&s.ID, &s.Source, &s.Account, &s.Title, &s.Preview, &s.Snippet, &s.Kind,
 			&s.SourceTS, &s.CapturedAt, &completedAt, &s.AutoCompleted, &s.Pinned,
 			&urgency, &urgencySource); err != nil {
 			return nil, fmt.Errorf("scan signal: %w", err)

@@ -342,6 +342,35 @@ CREATE TABLE tab_notes (
 );
 CREATE INDEX idx_tab_notes_url ON tab_notes(url);`,
 	},
+	{
+		Version:     14,
+		Description: "add account column to signals table",
+		SQL: `
+PRAGMA foreign_keys = OFF;
+DROP TABLE IF EXISTS signals_new;
+CREATE TABLE signals_new (
+    id              INTEGER PRIMARY KEY,
+    source          TEXT NOT NULL,
+    account         TEXT NOT NULL DEFAULT '',
+    title           TEXT NOT NULL,
+    preview         TEXT DEFAULT '',
+    snippet         TEXT DEFAULT '',
+    source_ts       TEXT NOT NULL DEFAULT '',
+    captured_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at    DATETIME,
+    auto_completed  BOOLEAN DEFAULT 0,
+    pinned          BOOLEAN DEFAULT 0,
+    kind            TEXT DEFAULT '',
+    urgency         TEXT,
+    urgency_source  TEXT,
+    UNIQUE(source, account, title, preview, source_ts)
+);
+INSERT INTO signals_new (id, source, account, title, preview, snippet, source_ts, captured_at, completed_at, auto_completed, pinned, kind, urgency, urgency_source)
+    SELECT id, source, '', title, preview, snippet, source_ts, captured_at, completed_at, auto_completed, pinned, kind, urgency, urgency_source FROM signals;
+DROP TABLE signals;
+ALTER TABLE signals_new RENAME TO signals;
+PRAGMA foreign_keys = ON;`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.

@@ -25,6 +25,35 @@ func TestDetectSource(t *testing.T) {
 	}
 }
 
+func TestExtractAccount(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		// Gmail
+		{"https://mail.google.com/mail/u/0/#inbox", "0"},
+		{"https://mail.google.com/mail/u/1/#inbox", "1"},
+		{"https://mail.google.com/mail/u/2/#label/Work", "2"},
+		{"https://mail.google.com/mail/#inbox", "0"}, // no /u/N/ → default "0"
+		// Slack
+		{"https://app.slack.com/client/T12345/C67890", "T12345"},
+		{"https://my-workspace.slack.com/", "my-workspace"},
+		{"https://app.slack.com/", ""},
+		// Matrix
+		{"https://app.element.io/#/room/!abc:matrix.org", "app.element.io"},
+		{"https://chat.mozilla.org/#/room/!foo:mozilla.org", "chat.mozilla.org"},
+		// Non-signal URLs
+		{"https://github.com/foo/bar", ""},
+		{"https://example.com", ""},
+	}
+	for _, tt := range tests {
+		got := ExtractAccount(tt.url)
+		if got != tt.want {
+			t.Errorf("ExtractAccount(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
 func TestParseItemsJSONWithTimestamp(t *testing.T) {
 	raw := `[{"title":"Alice","preview":"hello","timestamp":"2:30 PM"},{"title":"Bob","preview":"world","timestamp":""}]`
 	items, err := ParseItemsJSON(raw)

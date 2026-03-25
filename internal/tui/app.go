@@ -56,8 +56,9 @@ type signalActionMsg struct {
 }
 
 type signalNavigateMsg struct {
-	Source string
-	Title  string
+	Source  string
+	Account string
+	Title   string
 }
 
 type rebuildTickMsg struct{}
@@ -84,6 +85,7 @@ type wsCmdResponseMsg struct {
 	error   string
 	content string
 	items   string
+	account string
 }
 type wsVisitsBatchMsg struct {
 	id  string
@@ -176,6 +178,7 @@ type SummarizeJob struct {
 type SignalJob struct {
 	Tab       *types.Tab
 	Source    string
+	Account   string
 	ContentID string
 }
 
@@ -460,9 +463,9 @@ func runClassifyOne(db *sql.DB, model, host string) tea.Cmd {
 	}
 }
 
-func runReconcileSignals(db *sql.DB, source string, items []signal.SignalItem, capturedAt time.Time) tea.Cmd {
+func runReconcileSignals(db *sql.DB, source string, account string, items []signal.SignalItem, capturedAt time.Time) tea.Cmd {
 	return func() tea.Msg {
-		applog.Info("signal.reconcile.start", "source", source, "itemCount", len(items), "capturedAt", capturedAt.Format(time.RFC3339))
+		applog.Info("signal.reconcile.start", "source", source, "account", account, "itemCount", len(items), "capturedAt", capturedAt.Format(time.RFC3339))
 		records := make([]storage.SignalRecord, len(items))
 		for i, item := range items {
 			records[i] = storage.SignalRecord{
@@ -473,9 +476,9 @@ func runReconcileSignals(db *sql.DB, source string, items []signal.SignalItem, c
 				SourceTS: item.Timestamp,
 			}
 		}
-		err := storage.ReconcileSignals(db, source, records, capturedAt)
+		err := storage.ReconcileSignals(db, source, account, records, capturedAt)
 		if err != nil {
-			applog.Error("signal.reconcile.error", err, "source", source)
+			applog.Error("signal.reconcile.error", err, "source", source, "account", account)
 			return signalCompleteMsg{source: source, err: err}
 		}
 		return signalCompleteMsg{source: source}
@@ -505,7 +508,7 @@ func setUrgencyCmd(db *sql.DB, id int64, urgency string, source string) tea.Cmd 
 
 func extractGitHubFromRecentSignals(db *sql.DB, source string) tea.Cmd {
 	return func() tea.Msg {
-		signals, err := storage.ListSignals(db, source, false)
+		signals, err := storage.ListSignals(db, source, "", false)
 		if err != nil {
 			return nil
 		}
@@ -516,7 +519,7 @@ func extractGitHubFromRecentSignals(db *sql.DB, source string) tea.Cmd {
 
 func extractBugzillaFromRecentSignals(db *sql.DB, source string) tea.Cmd {
 	return func() tea.Msg {
-		signals, err := storage.ListSignals(db, source, false)
+		signals, err := storage.ListSignals(db, source, "", false)
 		if err != nil {
 			return nil
 		}
@@ -601,7 +604,7 @@ func listenWebSocket(srv *server.Server) tea.Cmd {
 				return wsNoteListMsg{id: msg.ID, tabID: msg.TabID, url: msg.URL}
 			default:
 				if msg.ID != "" && msg.OK != nil {
-					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error, content: msg.Content, items: msg.Items}
+					return wsCmdResponseMsg{id: msg.ID, ok: *msg.OK, error: msg.Error, content: msg.Content, items: msg.Items, account: msg.Account}
 				}
 			}
 		}
@@ -1003,7 +1006,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			delete(m.tabsView.signalErrors, msg.source)
 		}
 		if m.tabsView.signalSource != "" {
-			m.tabsView.signals, _ = storage.ListSignals(m.db, m.tabsView.signalSource, true)
+			m.tabsView.signals, _ = storage.ListSignals(m.db, m.tabsView.signalSource, m.tabsView.signalAccount, true)
 		}
 		m.tabsView.tree.SignalCounts, _ = storage.ActiveSignalCounts(m.db)
 		m.tabsView.tree.SignalUrgency, _ = storage.HighestUrgencyBySource(m.db)
@@ -1024,7 +1027,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tabsView.signalErrors[msg.source] = msg.err.Error()
 		}
 		if m.tabsView.signalSource != "" {
-			m.tabsView.signals, _ = storage.ListSignals(m.db, m.tabsView.signalSource, true)
+			m.tabsView.signals, _ = storage.ListSignals(m.db, m.tabsView.signalSource, m.tabsView.signalAccount, true)
 			if m.tabsView.signalCursor >= len(m.tabsView.signals) {
 				m.tabsView.signalCursor = len(m.tabsView.signals) - 1
 			}
@@ -1043,7 +1046,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case signalNavigateMsg:
 		if m.mode == ModeLive && m.connected {
-			tab := m.tabsView.findTabForSource(msg.Source)
+			var tab *types.Tab
+			if msg.Account != "" {
+				tab = m.tabsView.findTabForSourceAccount(msg.Source, msg.Account)
+			}
+			if tab == nil {
+				tab = m.tabsView.findTabForSource(msg.Source)
+			}
 			if tab != nil && tab.BrowserID != 0 {
 				return m, navigateSignalCmd(m.server, tab.BrowserID, msg.Source, msg.Title)
 			}
@@ -1377,8 +1386,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		applog.Info("tui.cmdResponse", "id", msg.id, "ok", msg.ok)
 		if m.tabsView.signalActive != nil && m.tabsView.signalActive.ContentID == msg.id {
 			source := m.tabsView.signalActive.Source
+			urlAccount := m.tabsView.signalActive.Account
+			account := urlAccount
+			// Prefer extension-provided account over URL-derived one
+			if msg.account != "" {
+				account = msg.account
+				m.tabsView.setAccountMapping(source, urlAccount, msg.account)
+			}
 			m.tabsView.signalActive = nil
-			applog.Info("signal.extResponse", "source", source, "ok", msg.ok, "error", msg.error, "rawLen", len(msg.items))
+			applog.Info("signal.extResponse", "source", source, "account", account, "ok", msg.ok, "error", msg.error, "rawLen", len(msg.items))
 			applog.Info("signal.extItems", "source", source, "raw", msg.items)
 			if !msg.ok {
 				applog.Error("signal.extResponse.fail", fmt.Errorf("%s", msg.error), "source", source)
@@ -1391,10 +1407,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tabsView.signalErrors[source] = err.Error()
 				return m, tea.Batch(listenWebSocket(m.server), m.tabsView.processNextSignal())
 			}
-			applog.Info("signal.parsed", "source", source, "count", len(items))
+			applog.Info("signal.parsed", "source", source, "account", account, "count", len(items))
 			return m, tea.Batch(
 				listenWebSocket(m.server),
-				runReconcileSignals(m.db, source, items, time.Now()),
+				runReconcileSignals(m.db, source, account, items, time.Now()),
 			)
 		}
 		for _, job := range m.tabsView.summarizeJobs {
@@ -1820,7 +1836,7 @@ func (m *Model) buildTabInfoPayload(browserID int) *server.TabInfoPayload {
 	source := signal.DetectSource(tab.URL)
 	if source != "" && m.db != nil {
 		payload.SignalSource = source
-		if signals, err := storage.ListSignals(m.db, source, false); err == nil {
+		if signals, err := storage.ListSignals(m.db, source, "", false); err == nil {
 			for _, s := range signals {
 				payload.Signals = append(payload.Signals, server.SignalPayload{
 					ID:       s.ID,
