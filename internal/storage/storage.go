@@ -371,6 +371,20 @@ DROP TABLE signals;
 ALTER TABLE signals_new RENAME TO signals;
 PRAGMA foreign_keys = ON;`,
 	},
+	{
+		Version:     15,
+		Description: "dedupe bugzilla detail events and add unique detail index",
+		SQL: `
+DELETE FROM bugzilla_entity_events WHERE id NOT IN (
+    SELECT MIN(id) FROM bugzilla_entity_events
+    WHERE detail <> ''
+    GROUP BY entity_id, event_type, detail
+) AND detail <> '';
+
+CREATE UNIQUE INDEX idx_bugzilla_events_detail
+    ON bugzilla_entity_events(entity_id, event_type, detail)
+    WHERE detail <> '';`,
+	},
 }
 
 // OpenDB opens (or creates) a SQLite database at the given path.

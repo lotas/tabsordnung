@@ -271,16 +271,21 @@ func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *serve
 }
 
 func (m Model) Init() tea.Cmd {
+	backfill := backfillBugzillaEntitiesCmd(m.db)
 	if m.mode == ModeLive {
 		return tea.Batch(
 			listenWebSocket(m.server),
 			startWSServerCtx(context.Background(), m.server),
+			backfill,
 		)
 	}
 	if len(m.profiles) == 1 {
-		return loadSession(m.profiles[0])
+		return tea.Batch(
+			loadSession(m.profiles[0]),
+			backfill,
+		)
 	}
-	return nil
+	return backfill
 }
 
 func (m *Model) startLiveMode() tea.Cmd {
@@ -526,6 +531,57 @@ func extractBugzillaFromRecentSignals(db *sql.DB, source string) tea.Cmd {
 		storage.ExtractBugzillaFromSignals(db, signals)
 		return nil
 	}
+}
+
+func extractBugzillaFromSessionTabs(db *sql.DB, session *types.SessionData) tea.Cmd {
+	return func() tea.Msg {
+		if session == nil {
+			return nil
+		}
+		candidates := make([]storage.BugzillaTabCandidate, 0, len(session.AllTabs))
+		for _, tab := range session.AllTabs {
+			candidates = append(candidates, storage.BugzillaTabCandidate{
+				URL:   tab.URL,
+				Title: tab.Title,
+			})
+		}
+		storage.ExtractBugzillaFromTabCandidates(db, candidates)
+		return nil
+	}
+}
+
+func backfillBugzillaEntitiesCmd(db *sql.DB) tea.Cmd {
+	return func() tea.Msg {
+		storage.BackfillBugzillaEntities(db)
+		return nil
+	}
+}
+
+func (m *Model) refreshSignalStateAfterEntityUpdate(cmd tea.Cmd) tea.Cmd {
+	if m.tabsView.signalSource != "" {
+		signals, err := storage.ListSignals(m.db, m.tabsView.signalSource, m.tabsView.signalAccount, true)
+		if err != nil {
+			applog.Error("tui.signal.reload", err, "source", m.tabsView.signalSource, "account", m.tabsView.signalAccount)
+			m.tabsView.signalErrors[m.tabsView.signalSource] = err.Error()
+		} else {
+			m.tabsView.signals = signals
+			delete(m.tabsView.signalErrors, m.tabsView.signalSource)
+		}
+	}
+	if counts, err := storage.ActiveSignalCounts(m.db); err == nil {
+		m.tabsView.tree.SignalCounts = counts
+	} else {
+		applog.Error("tui.signal.counts", err)
+	}
+	if urgency, err := storage.HighestUrgencyBySource(m.db); err == nil {
+		m.tabsView.tree.SignalUrgency = urgency
+	} else {
+		applog.Error("tui.signal.urgency", err)
+	}
+	if m.activeView == ViewSignals {
+		return tea.Batch(cmd, m.signalsView.Reload())
+	}
+	return cmd
 }
 
 // refreshGitHubEntitiesCmd triggers a background gh refresh (respects cooldown).
@@ -953,6 +1009,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			runDeadLinkChecks(m.session.AllTabs),
 			runGitHubChecks(m.session.AllTabs),
+			extractBugzillaFromSessionTabs(m.db, m.session),
 			activityCmd,
 			snapshotsCmd,
 			classifyTick(),
@@ -1107,6 +1164,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			runDeadLinkChecks(m.session.AllTabs),
 			runGitHubChecks(m.session.AllTabs),
+			extractBugzillaFromSessionTabs(m.db, m.session),
 			m.activityView.RefreshPeriods(),
 			listenWebSocket(m.server),
 			signalPollTick(),
@@ -1461,12 +1519,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case githubRefreshDoneMsg:
 		v, cmd := m.githubView.Update(msg)
 		m.githubView = v
-		return m, cmd
+		return m, m.refreshSignalStateAfterEntityUpdate(cmd)
 
 	case bugzillaRefreshDoneMsg:
 		v, cmd := m.bugzillaView.Update(msg)
 		m.bugzillaView = v
-		return m, cmd
+		return m, m.refreshSignalStateAfterEntityUpdate(cmd)
 
 	case bugzillaViewLoadedMsg:
 		v, cmd := m.bugzillaView.Update(msg)
@@ -1720,7 +1778,7 @@ func (m Model) View() string {
 	case ViewTabs:
 		bottomText = m.tabsView.BottomBar()
 	case ViewSignals:
-		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 open \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 [/] urgency \u00b7 1-6 view \u00b7 p source \u00b7 q quit"
+		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 open \u00b7 o linked page \u00b7 tab focus \u00b7 x complete \u00b7 u reopen \u00b7 [/] urgency \u00b7 1-6 view \u00b7 p source \u00b7 q quit"
 	case ViewGitHub:
 		bottomText = "\u2191\u2193/jk navigate \u00b7 \u21b5 detail \u00b7 tab focus \u00b7 t tree \u00b7 f filter \u00b7 r refresh \u00b7 o browser \u00b7 1-6 view \u00b7 q quit"
 	case ViewBugzilla:

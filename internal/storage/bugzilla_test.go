@@ -80,6 +80,21 @@ func TestExtractBugzillaFromSignalRecord_EmailNotification(t *testing.T) {
 		t.Errorf("got {%s, %d}, want {bugzilla.mozilla.org, 1971046}", ref.host, ref.bugID)
 	}
 }
+func TestExtractBugzillaFromSignalRecord_NeedinfoPreview(t *testing.T) {
+	sig := SignalRecord{
+		Source:  "gmail",
+		Title:   "bugzilla-daemon",
+		Preview: "needinfo requested: [Bug 2027573] (Secure bug 2027573 in Taskcluster :: General)",
+		Snippet: `- This email would have contained sensitive information, but you have not set a PGP/GPG key or SMIME certificate in the "Secure Mail" section of your user preferences.`,
+	}
+	ref := extractBugzillaFromSignalRecord(sig)
+	if ref == nil {
+		t.Fatal("expected bugzilla ref, got nil")
+	}
+	if ref.host != "bugzilla.mozilla.org" || ref.bugID != 2027573 {
+		t.Errorf("got {%s, %d}, want {bugzilla.mozilla.org, 2027573}", ref.host, ref.bugID)
+	}
+}
 
 func TestExtractBugzillaFromSnapshot_EmailTab(t *testing.T) {
 	db := testDB(t)
@@ -115,6 +130,45 @@ func TestExtractBugzillaFromSnapshot_EmailTab(t *testing.T) {
 	}
 	if entities[0].Title != "Intermittent crash in widget" {
 		t.Errorf("Title = %q, want %q", entities[0].Title, "Intermittent crash in widget")
+	}
+}
+
+func TestExtractBugzillaFromTabCandidates_CurrentTabs(t *testing.T) {
+	db := testDB(t)
+
+	tabs := []BugzillaTabCandidate{{
+		URL:   "https://mail.google.com/mail/u/0/#inbox/abc123",
+		Title: "needinfo requested: [Bug 2027573] (Secure bug 2027573 in Taskcluster :: General)",
+	}}
+
+	count, err := ExtractBugzillaFromTabCandidates(db, tabs)
+	if err != nil {
+		t.Fatalf("extract current tabs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 entity, got %d", count)
+	}
+	if _, err := ExtractBugzillaFromTabCandidates(db, tabs); err != nil {
+		t.Fatalf("extract current tabs second pass: %v", err)
+	}
+
+	entities, _ := ListBugzillaEntities(db)
+	if len(entities) != 1 {
+		t.Fatalf("want 1 entity, got %d", len(entities))
+	}
+	if entities[0].BugID != 2027573 {
+		t.Fatalf("BugID = %d, want 2027573", entities[0].BugID)
+	}
+
+	events, err := ListBugzillaEntityEvents(db, entities[0].ID)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 deduped event, got %d", len(events))
+	}
+	if events[0].Detail != tabs[0].URL {
+		t.Fatalf("event detail = %q, want %q", events[0].Detail, tabs[0].URL)
 	}
 }
 

@@ -106,5 +106,8 @@ func RefreshEntities(db *sql.DB, entities []storage.BugzillaEntity, force bool) 
 			applog.Error("bugzilla.refresh.update", err, "entity", e.ID)
 		}
 	}
+	if _, err := storage.AutoCompleteSignalsForClosedEntities(db); err != nil {
+		applog.Error("bugzilla.refresh.signals", err)
+	}
 	return nil
 }

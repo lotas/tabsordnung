@@ -391,3 +391,132 @@ func TestFormatSignalsJSONWithSnippet(t *testing.T) {
 		t.Errorf("expected snippet value in JSON, got:\n%s", out)
 	}
 }
+
+func TestListSignalsIncludesLinkedGitHubEntity(t *testing.T) {
+	db := testDB(t)
+	now := time.Now()
+	if err := InsertSignal(db, SignalRecord{
+		Source:     "gmail",
+		Title:      "Review requested",
+		Preview:    "https://github.com/mozilla/gecko-dev/pull/123",
+		CapturedAt: now,
+	}); err != nil {
+		t.Fatalf("InsertSignal: %v", err)
+	}
+
+	sigs, err := ListSignals(db, "gmail", "", false)
+	if err != nil {
+		t.Fatalf("ListSignals: %v", err)
+	}
+	if _, err := ExtractGitHubFromSignals(db, sigs); err != nil {
+		t.Fatalf("ExtractGitHubFromSignals: %v", err)
+	}
+
+	entities, err := ListGitHubEntities(db, GitHubFilter{})
+	if err != nil {
+		t.Fatalf("ListGitHubEntities: %v", err)
+	}
+	if len(entities) != 1 {
+		t.Fatalf("expected 1 GitHub entity, got %d", len(entities))
+	}
+	if err := UpdateGitHubEntityStatus(db, entities[0].ID, GitHubStatusUpdate{Title: "Fix tabs", State: "merged"}); err != nil {
+		t.Fatalf("UpdateGitHubEntityStatus: %v", err)
+	}
+
+	sigs, err = ListSignals(db, "gmail", "", false)
+	if err != nil {
+		t.Fatalf("ListSignals reload: %v", err)
+	}
+	if sigs[0].Entity == nil {
+		t.Fatal("expected linked entity on signal")
+	}
+	if sigs[0].Entity.Provider != "github" || sigs[0].Entity.Kind != "pull" {
+		t.Fatalf("unexpected entity: %+v", sigs[0].Entity)
+	}
+	if sigs[0].Entity.URL != "https://github.com/mozilla/gecko-dev/pull/123" {
+		t.Fatalf("unexpected URL: %q", sigs[0].Entity.URL)
+	}
+	if !sigs[0].Entity.Closed || sigs[0].Entity.State != "merged" {
+		t.Fatalf("expected merged linked entity, got %+v", sigs[0].Entity)
+	}
+}
+
+func TestAutoCompleteSignalsForClosedEntities(t *testing.T) {
+	db := testDB(t)
+	now := time.Now()
+	if err := InsertSignal(db, SignalRecord{
+		Source:     "gmail",
+		Title:      "Bugzilla update",
+		Snippet:    "See https://bugzilla.mozilla.org/show_bug.cgi?id=1900001",
+		CapturedAt: now,
+	}); err != nil {
+		t.Fatalf("InsertSignal: %v", err)
+	}
+
+	sigs, err := ListSignals(db, "gmail", "", false)
+	if err != nil {
+		t.Fatalf("ListSignals: %v", err)
+	}
+	if _, err := ExtractBugzillaFromSignals(db, sigs); err != nil {
+		t.Fatalf("ExtractBugzillaFromSignals: %v", err)
+	}
+
+	entities, err := ListBugzillaEntities(db)
+	if err != nil {
+		t.Fatalf("ListBugzillaEntities: %v", err)
+	}
+	if len(entities) != 1 {
+		t.Fatalf("expected 1 Bugzilla entity, got %d", len(entities))
+	}
+	if err := UpdateBugzillaEntityStatus(db, entities[0].ID, BugzillaStatusUpdate{Title: "Crash", Status: "RESOLVED", Resolution: "FIXED"}); err != nil {
+		t.Fatalf("UpdateBugzillaEntityStatus: %v", err)
+	}
+
+	updated, err := AutoCompleteSignalsForClosedEntities(db)
+	if err != nil {
+		t.Fatalf("AutoCompleteSignalsForClosedEntities: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("expected 1 auto-completed signal, got %d", updated)
+	}
+
+	all, err := ListSignals(db, "gmail", "", true)
+	if err != nil {
+		t.Fatalf("ListSignals all: %v", err)
+	}
+	if all[0].CompletedAt == nil || !all[0].AutoCompleted {
+		t.Fatalf("expected completed auto-closed signal, got %+v", all[0])
+	}
+}
+
+func TestFormatSignalsOutputsLinkedEntity(t *testing.T) {
+	now := time.Now()
+	sigs := []SignalRecord{{
+		ID:         1,
+		Source:     "gmail",
+		Title:      "PR merged",
+		Preview:    "done",
+		CapturedAt: now,
+		Entity: &SignalEntityLink{
+			Provider: "github",
+			Kind:     "pull",
+			Label:    "mozilla/gecko-dev#55",
+			URL:      "https://github.com/mozilla/gecko-dev/pull/55",
+			State:    "merged",
+			Closed:   true,
+		},
+	}}
+
+	md := FormatSignalsMarkdown(sigs)
+	if !strings.Contains(md, "Link: mozilla/gecko-dev#55 [merged]") {
+		t.Fatalf("expected markdown linked entity, got:\n%s", md)
+	}
+
+	jsonOut, err := FormatSignalsJSON(sigs)
+	if err != nil {
+		t.Fatalf("FormatSignalsJSON: %v", err)
+	}
+	if !strings.Contains(jsonOut, `"linked_entity"`) || !strings.Contains(jsonOut, `"closed": true`) {
+		t.Fatalf("expected linked entity JSON, got:\n%s", jsonOut)
+	}
+}

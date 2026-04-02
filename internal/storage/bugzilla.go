@@ -47,6 +47,12 @@ type bugzillaRef struct {
 	bugID int
 }
 
+// BugzillaTabCandidate is a tab-like record that may reference a Bugzilla bug.
+type BugzillaTabCandidate struct {
+	URL   string
+	Title string
+}
+
 var (
 	urlCandidatePattern = regexp.MustCompile(`https?://[^\s<>()"']+`)
 	bugIDTextPattern    = regexp.MustCompile(`(?i)\bBug\s+(\d+)\b`)
@@ -280,6 +286,19 @@ func FormatBugzillaMarkdown(entities []BugzillaEntity, events map[int64][]Bugzil
 	return b.String()
 }
 
+func BugzillaEntityURL(host string, bugID int) string {
+	return fmt.Sprintf("https://%s/show_bug.cgi?id=%d", host, bugID)
+}
+
+func IsBugzillaClosed(status string) bool {
+	switch strings.ToUpper(status) {
+	case "RESOLVED", "VERIFIED", "CLOSED":
+		return true
+	default:
+		return false
+	}
+}
+
 func firstSeenSourceBugzilla(e BugzillaEntity, events map[int64][]BugzillaEntityEvent) string {
 	entityEvents, ok := events[e.ID]
 	if !ok || len(entityEvents) == 0 {
@@ -338,27 +357,35 @@ func ExtractBugzillaFromSnapshot(db *sql.DB, snapshotID int64) (int, error) {
 		if err := rows.Scan(&tabURL, &tabTitle); err != nil {
 			continue
 		}
-		ref := extractBugzillaFromURL(tabURL)
-		if ref == nil {
-			// Fall back to text-based extraction from tab title (e.g. Gmail tabs showing "[Bug NNNN]").
-			ref = extractBugzillaRefFromText(tabTitle)
-		}
-		if ref == nil {
-			continue
-		}
-		id, isNew, err := UpsertBugzillaEntity(db, ref.host, ref.bugID, "tab")
+		matched, err := recordBugzillaFromTab(db, tabURL, tabTitle, &snapshotID, "")
 		if err != nil {
 			continue
 		}
-		if isNew && tabTitle != "" {
-			if cleaned := CleanBugzillaTabTitle(tabTitle); cleaned != "" {
-				db.Exec(`UPDATE bugzilla_entities SET title=? WHERE id=? AND title=''`, cleaned, id)
-			}
+		if matched {
+			count++
 		}
-		_ = RecordBugzillaEvent(db, id, "tab_seen", nil, &snapshotID, "")
-		count++
 	}
 	return count, rows.Err()
+}
+
+// ExtractBugzillaFromTabCandidates scans current open tabs and upserts Bugzilla
+// entities without requiring a saved snapshot. Events are deduped by detail.
+func ExtractBugzillaFromTabCandidates(db *sql.DB, tabs []BugzillaTabCandidate) (int, error) {
+	count := 0
+	for _, tab := range tabs {
+		detail := strings.TrimSpace(tab.URL)
+		if detail == "" {
+			detail = strings.TrimSpace(tab.Title)
+		}
+		matched, err := recordBugzillaFromTab(db, tab.URL, tab.Title, nil, detail)
+		if err != nil {
+			continue
+		}
+		if matched {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // ExtractBugzillaFromSignals scans signal fields for Bugzilla references and
@@ -558,6 +585,34 @@ func extractBugzillaFromURL(rawURL string) *bugzillaRef {
 	}
 
 	return nil
+}
+
+func extractBugzillaFromTabText(tabURL, tabTitle string) *bugzillaRef {
+	ref := extractBugzillaFromURL(tabURL)
+	if ref != nil {
+		return ref
+	}
+	return extractBugzillaRefFromText(tabTitle)
+}
+
+func recordBugzillaFromTab(db *sql.DB, tabURL, tabTitle string, snapshotID *int64, detail string) (bool, error) {
+	ref := extractBugzillaFromTabText(tabURL, tabTitle)
+	if ref == nil {
+		return false, nil
+	}
+	id, isNew, err := UpsertBugzillaEntity(db, ref.host, ref.bugID, "tab")
+	if err != nil {
+		return false, err
+	}
+	if isNew && tabTitle != "" {
+		if cleaned := CleanBugzillaTabTitle(tabTitle); cleaned != "" {
+			db.Exec(`UPDATE bugzilla_entities SET title=? WHERE id=? AND title=''`, cleaned, id)
+		}
+	}
+	if err := RecordBugzillaEvent(db, id, "tab_seen", nil, snapshotID, detail); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func parsePositiveInt(s string) (int, bool) {

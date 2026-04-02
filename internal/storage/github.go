@@ -447,6 +447,10 @@ func FormatGitHubJSON(entities []GitHubEntity) (string, error) {
 	return string(data) + "\n", nil
 }
 
+func GitHubEntityURL(owner, repo, kind string, number int) string {
+	return fmt.Sprintf("https://github.com/%s/%s/%s/%d", owner, repo, entityURLPath(kind), number)
+}
+
 func entityURLPath(kind string) string {
 	if kind == "issue" {
 		return "issues"

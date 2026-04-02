@@ -18,14 +18,26 @@ type SignalRecord struct {
 	Title         string
 	Preview       string
 	Snippet       string
-	Kind          string   // "dm", "mention", "channel", or ""
+	Kind          string // "dm", "mention", "channel", or ""
 	SourceTS      string
 	CapturedAt    time.Time
 	CompletedAt   *time.Time
 	AutoCompleted bool
 	Pinned        bool
-	Urgency       *string  // "urgent", "review", "fyi", or nil (unclassified)
-	UrgencySource *string  // "heuristic", "llm", or nil
+	Urgency       *string // "urgent", "review", "fyi", or nil (unclassified)
+	UrgencySource *string // "heuristic", "llm", or nil
+	Entity        *SignalEntityLink
+}
+
+// SignalEntityLink describes a GitHub or Bugzilla entity linked to a signal.
+type SignalEntityLink struct {
+	Provider string // "github" or "bugzilla"
+	Kind     string // "pull", "issue", or "bug"
+	Label    string // "owner/repo#123" or "host#123"
+	Title    string
+	URL      string
+	State    string
+	Closed   bool
 }
 
 // ClassifyByKind returns urgency for signals with a known kind.
@@ -108,7 +120,13 @@ func ListSignals(db *sql.DB, source string, account string, includeCompleted boo
 		}
 		result = append(result, s)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := attachSignalEntityLinks(db, result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // ActiveSignalCounts returns the number of active (non-completed) signals per source.
@@ -315,7 +333,156 @@ func ListUnclassifiedSignals(db *sql.DB) ([]SignalRecord, error) {
 		}
 		result = append(result, s)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := attachSignalEntityLinks(db, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func attachSignalEntityLinks(db *sql.DB, signals []SignalRecord) error {
+	if len(signals) == 0 {
+		return nil
+	}
+
+	byID := make(map[int64]*SignalRecord, len(signals))
+	ids := make([]interface{}, 0, len(signals))
+	placeholders := make([]string, 0, len(signals))
+	for i := range signals {
+		byID[signals[i].ID] = &signals[i]
+		ids = append(ids, signals[i].ID)
+		placeholders = append(placeholders, "?")
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	ghQuery := fmt.Sprintf(`
+		SELECT gee.signal_id, ge.owner, ge.repo, ge.number, ge.kind, ge.title, ge.state
+		FROM github_entity_events gee
+		JOIN github_entities ge ON ge.id = gee.entity_id
+		WHERE gee.event_type = 'signal_seen' AND gee.signal_id IN (%s)
+		ORDER BY gee.id DESC`, inClause)
+	ghRows, err := db.Query(ghQuery, ids...)
+	if err != nil {
+		return fmt.Errorf("query github signal links: %w", err)
+	}
+	defer ghRows.Close()
+	for ghRows.Next() {
+		var signalID int64
+		var owner, repo, kind, title, state string
+		var number int
+		if err := ghRows.Scan(&signalID, &owner, &repo, &number, &kind, &title, &state); err != nil {
+			return fmt.Errorf("scan github signal link: %w", err)
+		}
+		sig := byID[signalID]
+		if sig == nil || sig.Entity != nil {
+			continue
+		}
+		sig.Entity = &SignalEntityLink{
+			Provider: "github",
+			Kind:     kind,
+			Label:    fmt.Sprintf("%s/%s#%d", owner, repo, number),
+			Title:    title,
+			URL:      GitHubEntityURL(owner, repo, kind, number),
+			State:    state,
+			Closed:   state == "closed" || state == "merged",
+		}
+	}
+	if err := ghRows.Err(); err != nil {
+		return fmt.Errorf("iterate github signal links: %w", err)
+	}
+
+	bzQuery := fmt.Sprintf(`
+		SELECT bee.signal_id, be.host, be.bug_id, be.title, be.status, be.resolution
+		FROM bugzilla_entity_events bee
+		JOIN bugzilla_entities be ON be.id = bee.entity_id
+		WHERE bee.event_type = 'signal_seen' AND bee.signal_id IN (%s)
+		ORDER BY bee.id DESC`, inClause)
+	bzRows, err := db.Query(bzQuery, ids...)
+	if err != nil {
+		return fmt.Errorf("query bugzilla signal links: %w", err)
+	}
+	defer bzRows.Close()
+	for bzRows.Next() {
+		var signalID int64
+		var host, title, status, resolution string
+		var bugID int
+		if err := bzRows.Scan(&signalID, &host, &bugID, &title, &status, &resolution); err != nil {
+			return fmt.Errorf("scan bugzilla signal link: %w", err)
+		}
+		sig := byID[signalID]
+		if sig == nil || sig.Entity != nil {
+			continue
+		}
+		state := status
+		if resolution != "" {
+			state += "/" + resolution
+		}
+		sig.Entity = &SignalEntityLink{
+			Provider: "bugzilla",
+			Kind:     "bug",
+			Label:    fmt.Sprintf("%s#%d", host, bugID),
+			Title:    title,
+			URL:      BugzillaEntityURL(host, bugID),
+			State:    state,
+			Closed:   IsBugzillaClosed(status),
+		}
+	}
+	if err := bzRows.Err(); err != nil {
+		return fmt.Errorf("iterate bugzilla signal links: %w", err)
+	}
+
+	return nil
+}
+
+// AutoCompleteSignalsForClosedEntities completes active, unpinned signals whose
+// linked GitHub or Bugzilla entity is already closed or resolved.
+func AutoCompleteSignalsForClosedEntities(db *sql.DB) (int64, error) {
+	if db == nil {
+		return 0, nil
+	}
+	var total int64
+
+	res, err := db.Exec(`
+		UPDATE signals
+		SET completed_at = CURRENT_TIMESTAMP, auto_completed = 1
+		WHERE completed_at IS NULL
+		  AND pinned = 0
+		  AND EXISTS (
+			SELECT 1
+			FROM github_entity_events gee
+			JOIN github_entities ge ON ge.id = gee.entity_id
+			WHERE gee.signal_id = signals.id
+			  AND gee.event_type = 'signal_seen'
+			  AND ge.state IN ('closed', 'merged')
+		  )`)
+	if err != nil {
+		return 0, fmt.Errorf("auto-complete github-linked signals: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	total += n
+
+	res, err = db.Exec(`
+		UPDATE signals
+		SET completed_at = CURRENT_TIMESTAMP, auto_completed = 1
+		WHERE completed_at IS NULL
+		  AND pinned = 0
+		  AND EXISTS (
+			SELECT 1
+			FROM bugzilla_entity_events bee
+			JOIN bugzilla_entities be ON be.id = bee.entity_id
+			WHERE bee.signal_id = signals.id
+			  AND bee.event_type = 'signal_seen'
+			  AND UPPER(be.status) IN ('RESOLVED', 'VERIFIED', 'CLOSED')
+		  )`)
+	if err != nil {
+		return 0, fmt.Errorf("auto-complete bugzilla-linked signals: %w", err)
+	}
+	n, _ = res.RowsAffected()
+	total += n
+
+	return total, nil
 }
 
 // UpdateUrgency sets the urgency and urgency_source for a signal.
@@ -423,6 +590,10 @@ func FormatSignalsMarkdown(signals []SignalRecord) string {
 				if s.Snippet != "" {
 					fmt.Fprintf(&b, "  > %s\n", s.Snippet)
 				}
+				if s.Entity != nil {
+					fmt.Fprintf(&b, "  Link: %s [%s]\n", s.Entity.Label, SignalEntityStateLabel(s.Entity))
+					fmt.Fprintf(&b, "  URL: %s\n", s.Entity.URL)
+				}
 			}
 		}
 		b.WriteString("\n")
@@ -452,16 +623,27 @@ func formatAge(t time.Time) string {
 
 // SignalJSONOutput is the structure for --json output.
 type SignalJSONOutput struct {
-	ID            int64  `json:"id"`
-	Account       string `json:"account,omitempty"`
-	Title         string `json:"title"`
-	Preview       string `json:"preview"`
-	Snippet       string `json:"snippet,omitempty"`
-	SourceTS      string `json:"source_ts,omitempty"`
-	CapturedAt    string `json:"captured_at"`
-	Active        bool   `json:"active"`
-	Urgency       string `json:"urgency,omitempty"`
-	UrgencySource string `json:"urgency_source,omitempty"`
+	ID            int64                       `json:"id"`
+	Account       string                      `json:"account,omitempty"`
+	Title         string                      `json:"title"`
+	Preview       string                      `json:"preview"`
+	Snippet       string                      `json:"snippet,omitempty"`
+	SourceTS      string                      `json:"source_ts,omitempty"`
+	CapturedAt    string                      `json:"captured_at"`
+	Active        bool                        `json:"active"`
+	Urgency       string                      `json:"urgency,omitempty"`
+	UrgencySource string                      `json:"urgency_source,omitempty"`
+	LinkedEntity  *SignalEntityLinkJSONOutput `json:"linked_entity,omitempty"`
+}
+
+type SignalEntityLinkJSONOutput struct {
+	Provider string `json:"provider"`
+	Kind     string `json:"kind"`
+	Label    string `json:"label"`
+	Title    string `json:"title,omitempty"`
+	URL      string `json:"url"`
+	State    string `json:"state,omitempty"`
+	Closed   bool   `json:"closed"`
 }
 
 // FormatSignalsJSON formats signals grouped by source as JSON.
@@ -484,6 +666,17 @@ func FormatSignalsJSON(signals []SignalRecord) (string, error) {
 		if s.UrgencySource != nil {
 			out.UrgencySource = *s.UrgencySource
 		}
+		if s.Entity != nil {
+			out.LinkedEntity = &SignalEntityLinkJSONOutput{
+				Provider: s.Entity.Provider,
+				Kind:     s.Entity.Kind,
+				Label:    s.Entity.Label,
+				Title:    s.Entity.Title,
+				URL:      s.Entity.URL,
+				State:    s.Entity.State,
+				Closed:   s.Entity.Closed,
+			}
+		}
 		grouped[s.Source] = append(grouped[s.Source], out)
 	}
 	data, err := json.MarshalIndent(grouped, "", "  ")
@@ -491,4 +684,17 @@ func FormatSignalsJSON(signals []SignalRecord) (string, error) {
 		return "", err
 	}
 	return string(data) + "\n", nil
+}
+
+func SignalEntityStateLabel(link *SignalEntityLink) string {
+	if link == nil {
+		return ""
+	}
+	if link.State != "" {
+		return link.State
+	}
+	if link.Closed {
+		return "closed"
+	}
+	return "open"
 }

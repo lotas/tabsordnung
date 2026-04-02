@@ -17,13 +17,13 @@ const refreshCooldown = 10 * time.Minute
 
 // EntityRefreshResult holds parsed GraphQL response data for a single entity.
 type EntityRefreshResult struct {
-	State        string   // "OPEN", "CLOSED", "MERGED"
+	State        string // "OPEN", "CLOSED", "MERGED"
 	Title        string
 	Author       string
-	UpdatedAt    string   // RFC3339
+	UpdatedAt    string // RFC3339
 	Assignees    []string
-	ReviewStatus string   // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", ""
-	ChecksStatus string   // "SUCCESS", "FAILURE", "PENDING", ""
+	ReviewStatus string // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", ""
+	ChecksStatus string // "SUCCESS", "FAILURE", "PENDING", ""
 }
 
 // ToStatusUpdate converts an EntityRefreshResult to a storage.GitHubStatusUpdate.
@@ -31,9 +31,9 @@ type EntityRefreshResult struct {
 // storage-friendly values, and parses UpdatedAt to time.Time.
 func (r EntityRefreshResult) ToStatusUpdate() storage.GitHubStatusUpdate {
 	update := storage.GitHubStatusUpdate{
-		Title:    r.Title,
-		State:    strings.ToLower(r.State),
-		Author:   r.Author,
+		Title:     r.Title,
+		State:     strings.ToLower(r.State),
+		Author:    r.Author,
 		Assignees: strings.Join(r.Assignees, ","),
 	}
 
@@ -146,14 +146,14 @@ type refreshItemResponse struct {
 	Author *struct {
 		Login string `json:"login"`
 	} `json:"author"`
-	UpdatedAt  string `json:"updatedAt"`
-	Assignees  *struct {
+	UpdatedAt string `json:"updatedAt"`
+	Assignees *struct {
 		Nodes []struct {
 			Login string `json:"login"`
 		} `json:"nodes"`
 	} `json:"assignees"`
-	ReviewDecision     *string `json:"reviewDecision"`
-	StatusCheckRollup  *struct {
+	ReviewDecision    *string `json:"reviewDecision"`
+	StatusCheckRollup *struct {
 		State string `json:"state"`
 	} `json:"statusCheckRollup"`
 }
@@ -304,5 +304,8 @@ func RefreshEntities(db *sql.DB, entities []storage.GitHubEntity, token string, 
 	}
 
 	applog.Info("github.refresh.done", "updated", len(results), "total", len(filteredRefs))
+	if _, err := storage.AutoCompleteSignalsForClosedEntities(db); err != nil {
+		applog.Error("github.refresh.signals", err)
+	}
 	return nil
 }

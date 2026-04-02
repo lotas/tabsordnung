@@ -3,6 +3,8 @@ package tui
 import (
 	"database/sql"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -367,6 +369,11 @@ func (v SignalsView) Update(msg tea.Msg) (SignalsView, tea.Cmd) {
 				next := cycleUrgencyDown(sig.Urgency)
 				return v, setUrgencyCmd(v.db, sig.ID, next, sig.Source)
 			}
+		case "o":
+			sig := v.selectedSignal()
+			if sig != nil && sig.Entity != nil && sig.Entity.URL != "" {
+				return v, openSignalEntityInBrowser(sig.Entity.URL)
+			}
 		}
 	}
 	return v, nil
@@ -540,7 +547,7 @@ func (v SignalsView) ViewDetail() string {
 	}
 
 	b.WriteString(labelStyle.Render("Captured") + "\n")
-	b.WriteString(valueStyle.Render(sig.CapturedAt.Local().Format("2006-01-02 15:04") + " (" + formatSignalAge(sig.CapturedAt) + ")") + "\n\n")
+	b.WriteString(valueStyle.Render(sig.CapturedAt.Local().Format("2006-01-02 15:04")+" ("+formatSignalAge(sig.CapturedAt)+")") + "\n\n")
 
 	b.WriteString(labelStyle.Render("Urgency") + "\n")
 	if sig.Urgency != nil {
@@ -563,6 +570,23 @@ func (v SignalsView) ViewDetail() string {
 		b.WriteString(uStyle.Render(urgencyVal+src) + "\n\n")
 	} else {
 		b.WriteString(valueStyle.Render("pending") + "\n\n")
+	}
+
+	if sig.Entity != nil {
+		b.WriteString(labelStyle.Render("Linked Entity") + "\n")
+		b.WriteString(valueStyle.Render(sig.Entity.Label) + "\n")
+		if sig.Entity.Title != "" {
+			b.WriteString(valueStyle.Render(sig.Entity.Title) + "\n")
+		}
+		state := storage.SignalEntityStateLabel(sig.Entity)
+		if sig.Entity.Closed {
+			b.WriteString(completedStyle.Render("closed: "+state) + "\n")
+		} else {
+			b.WriteString(activeStyle.Render("open: "+state) + "\n")
+		}
+		b.WriteString(valueStyle.Render(sig.Entity.URL) + "\n")
+		b.WriteString(labelStyle.Render("Open linked entity") + "\n")
+		b.WriteString(valueStyle.Render("Press o") + "\n\n")
 	}
 
 	b.WriteString(labelStyle.Render("Status") + "\n")
@@ -608,5 +632,21 @@ func cycleUrgencyDown(current *string) string {
 		return "fyi"
 	default:
 		return "urgent"
+	}
+}
+
+func openSignalEntityInBrowser(url string) tea.Cmd {
+	return func() tea.Msg {
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			cmd = exec.Command("open", url)
+		case "linux":
+			cmd = exec.Command("xdg-open", url)
+		default:
+			cmd = exec.Command("open", url)
+		}
+		_ = cmd.Start()
+		return nil
 	}
 }
