@@ -26,12 +26,12 @@ type TabsView struct {
 	selected    map[int]bool // BrowserID -> selected (live mode multi-select)
 
 	// Signal list in detail pane
-	signals        []storage.SignalRecord
-	signalCursor   int
-	signalSource   string
-	signalAccount  string
-	accountMap     map[string]string // "source\x00urlAccount" → extName
-	accountRevMap  map[string]string // "source\x00extName" → urlAccount
+	signals       []storage.SignalRecord
+	signalCursor  int
+	signalSource  string
+	signalAccount string
+	accountMap    map[string]string // "source\x00urlAccount" → extName
+	accountRevMap map[string]string // "source\x00extName" → urlAccount
 
 	// Analysis progress
 	deadChecking   bool
@@ -134,7 +134,7 @@ func (v *TabsView) processNextSignal() tea.Cmd {
 
 func (v *TabsView) queueSignalPoll() tea.Cmd {
 	if v.session == nil || !v.connected {
-		return signalPollTick()
+		return nil
 	}
 
 	type sourceKey struct{ source, account string }
@@ -162,7 +162,7 @@ func (v *TabsView) queueSignalPoll() tea.Cmd {
 		v.signalQueue = append(v.signalQueue, &SignalJob{Tab: tab, Source: key.source, Account: key.account})
 	}
 
-	return tea.Batch(v.processNextSignal(), signalPollTick())
+	return v.processNextSignal()
 }
 
 func (v *TabsView) refreshSignals() {

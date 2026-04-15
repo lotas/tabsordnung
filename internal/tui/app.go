@@ -236,6 +236,10 @@ type Model struct {
 	// Debounced rebuild
 	rebuildDirty     bool
 	rebuildScheduled bool
+
+	// Background schedulers
+	signalPollScheduled bool
+	classifyScheduled   bool
 }
 
 func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server, summaryDir, ollamaModel, ollamaHost string, db *sql.DB) Model {
@@ -679,9 +683,25 @@ func navigateSignalCmd(srv *server.Server, tabID int, source, title string) tea.
 // --- Debounce helpers ---
 
 func rebuildTick() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+	return tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg {
 		return rebuildTickMsg{}
 	})
+}
+
+func (m *Model) scheduleSignalPoll() tea.Cmd {
+	if m.signalPollScheduled {
+		return nil
+	}
+	m.signalPollScheduled = true
+	return signalPollTick()
+}
+
+func (m *Model) scheduleClassify() tea.Cmd {
+	if m.classifyScheduled {
+		return nil
+	}
+	m.classifyScheduled = true
+	return classifyTick()
 }
 
 func (m *Model) scheduleRebuild() tea.Cmd {
@@ -1012,7 +1032,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			extractBugzillaFromSessionTabs(m.db, m.session),
 			activityCmd,
 			snapshotsCmd,
-			classifyTick(),
+			m.scheduleClassify(),
 		)
 
 	case analysisCompleteMsg:
@@ -1117,12 +1137,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case signalPollTickMsg:
-		return m, m.tabsView.queueSignalPoll()
+		m.signalPollScheduled = false
+		return m, tea.Batch(m.tabsView.queueSignalPoll(), m.scheduleSignalPoll())
 
 	case classifyTickMsg:
+		m.classifyScheduled = false
 		return m, tea.Batch(
 			runClassifyOne(m.db, m.ollamaModel, m.ollamaHost),
-			classifyTick(),
+			m.scheduleClassify(),
 		)
 
 	case classifyDoneMsg:
@@ -1167,8 +1189,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			extractBugzillaFromSessionTabs(m.db, m.session),
 			m.activityView.RefreshPeriods(),
 			listenWebSocket(m.server),
-			signalPollTick(),
-			classifyTick(),
+			m.scheduleSignalPoll(),
+			m.scheduleClassify(),
 			refreshGitHubEntitiesCmd(m.db),
 			refreshBugzillaEntitiesCmd(m.db),
 		)

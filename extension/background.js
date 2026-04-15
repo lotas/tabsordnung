@@ -170,8 +170,16 @@ browser.tabs.onRemoved.addListener((tabId) => {
 });
 
 browser.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+  const shouldForward = Boolean(
+    changeInfo.url ||
+    changeInfo.title ||
+    Object.prototype.hasOwnProperty.call(changeInfo, "groupId")
+  );
+
   ensureConnected();
-  send({ type: "tab.updated", tab: serializeTab(tab) });
+  if (shouldForward) {
+    send({ type: "tab.updated", tab: serializeTab(tab) });
+  }
   // Reset dwell timer if the active tab navigated to a new URL
   if (changeInfo.url && tab.active) {
     tabSummarizeState.delete(tab.id);
