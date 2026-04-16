@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -36,6 +37,12 @@ type sessionLoadedMsg struct {
 
 type analysisCompleteMsg struct{}
 type githubAnalysisCompleteMsg struct{}
+
+type deadLinkCacheEntry struct {
+	checkedAt  time.Time
+	isDead     bool
+	deadReason string
+}
 
 type summarizeCompleteMsg struct {
 	url     string
@@ -240,6 +247,14 @@ type Model struct {
 	// Background schedulers
 	signalPollScheduled bool
 	classifyScheduled   bool
+
+	// Live snapshot dedup
+	lastSnapshotFingerprint string
+	lastSnapshotAt          time.Time
+
+	// Dead-link caching
+	deadLinkCache    map[string]deadLinkCacheEntry
+	deadLinkInFlight map[string]int
 }
 
 func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *server.Server, summaryDir, ollamaModel, ollamaHost string, db *sql.DB) Model {
@@ -254,6 +269,8 @@ func NewModel(profiles []types.Profile, staleDays int, liveMode bool, srv *serve
 		db:          db,
 	}
 	m.threadSummarizeJobs = make(map[string]*ThreadSummarizeJob)
+	m.deadLinkCache = make(map[string]deadLinkCacheEntry)
+	m.deadLinkInFlight = make(map[string]int)
 	m.tabsView = NewTabsView(srv, db, summaryDir, ollamaModel, ollamaHost)
 	m.tabsView.staleDays = staleDays
 	m.signalsView = NewSignalsView(db)
@@ -321,6 +338,8 @@ func loadSession(profile types.Profile) tea.Cmd {
 
 func runDeadLinkChecks(tabs []*types.Tab) tea.Cmd {
 	return func() tea.Msg {
+		start := time.Now()
+		applog.Info("deadlinks.start", "tabs", len(tabs))
 		results := make(chan analyzer.DeadLinkResult, len(tabs))
 		go func() {
 			analyzer.AnalyzeDeadLinks(tabs, results)
@@ -328,24 +347,152 @@ func runDeadLinkChecks(tabs []*types.Tab) tea.Cmd {
 		}()
 		for range results {
 		}
+		applog.Info("deadlinks.done", "tabs", len(tabs), "durationMs", time.Since(start).Milliseconds())
 		return analysisCompleteMsg{}
+	}
+}
+
+const deadLinkCacheTTL = 15 * time.Minute
+
+func (m *Model) shouldReuseDeadLink(url string) (deadLinkCacheEntry, bool) {
+	if url == "" {
+		return deadLinkCacheEntry{}, false
+	}
+	entry, ok := m.deadLinkCache[url]
+	if !ok {
+		return deadLinkCacheEntry{}, false
+	}
+	if time.Since(entry.checkedAt) > deadLinkCacheTTL {
+		delete(m.deadLinkCache, url)
+		return deadLinkCacheEntry{}, false
+	}
+	return entry, true
+}
+
+func (m *Model) applyDeadLinkCache(tab *types.Tab) bool {
+	entry, ok := m.shouldReuseDeadLink(tab.URL)
+	if !ok {
+		return false
+	}
+	tab.IsDead = entry.isDead
+	tab.DeadReason = entry.deadReason
+	return true
+}
+
+func (m *Model) applyDeadLinkResultToURL(url string, entry deadLinkCacheEntry) {
+	if m.session == nil || url == "" {
+		return
+	}
+	for _, tab := range m.session.AllTabs {
+		if tab.URL != url {
+			continue
+		}
+		tab.IsDead = entry.isDead
+		tab.DeadReason = entry.deadReason
+	}
+}
+
+func deadLinkTarget(tab *types.Tab) string {
+	if tab == nil {
+		return ""
+	}
+	return fmt.Sprintf("id=%d url=%s", tab.BrowserID, tab.URL)
+}
+
+func (m *Model) deadLinkCmd(tabs []*types.Tab, reason string) tea.Cmd {
+	if len(tabs) == 0 {
+		applog.Info("deadlinks.skip", "reason", reason, "checked", 0, "cached", 0)
+		return nil
+	}
+	toCheck := make([]*types.Tab, 0, len(tabs))
+	cached := 0
+	inflight := 0
+	sampleChecked := make([]string, 0, min(len(tabs), 5))
+	sampleCached := make([]string, 0, min(len(tabs), 5))
+	sampleInflight := make([]string, 0, min(len(tabs), 5))
+	for _, tab := range tabs {
+		if tab == nil {
+			continue
+		}
+		if m.applyDeadLinkCache(tab) {
+			cached++
+			if len(sampleCached) < 5 {
+				entry, _ := m.shouldReuseDeadLink(tab.URL)
+				sampleCached = append(sampleCached, fmt.Sprintf("%s ageMs=%d dead=%t", deadLinkTarget(tab), time.Since(entry.checkedAt).Milliseconds(), entry.isDead))
+			}
+			continue
+		}
+		if n := m.deadLinkInFlight[tab.URL]; n > 0 {
+			inflight++
+			if len(sampleInflight) < 5 {
+				sampleInflight = append(sampleInflight, fmt.Sprintf("%s inflight=%d", deadLinkTarget(tab), n))
+			}
+			continue
+		}
+		toCheck = append(toCheck, tab)
+		if len(sampleChecked) < 5 {
+			sampleChecked = append(sampleChecked, fmt.Sprintf("%s inflight=%d", deadLinkTarget(tab), m.deadLinkInFlight[tab.URL]))
+		}
+	}
+	if len(toCheck) == 0 {
+		applog.Info("deadlinks.skip", "reason", reason, "checked", 0, "cached", cached, "inflight", inflight, "sampleCached", strings.Join(sampleCached, " ; "), "sampleInflight", strings.Join(sampleInflight, " ; "))
+		return nil
+	}
+	for _, tab := range toCheck {
+		m.deadLinkInFlight[tab.URL]++
+	}
+	applog.Info("deadlinks.plan", "reason", reason, "checked", len(toCheck), "cached", cached, "inflight", inflight, "sampleChecked", strings.Join(sampleChecked, " ; "), "sampleCached", strings.Join(sampleCached, " ; "), "sampleInflight", strings.Join(sampleInflight, " ; "))
+	cmd := runDeadLinkChecks(toCheck)
+	return func() tea.Msg {
+		start := time.Now()
+		msg := cmd()
+		now := time.Now()
+		resultSummary := make([]string, 0, min(len(toCheck), 5))
+		for _, tab := range toCheck {
+			entry := deadLinkCacheEntry{
+				checkedAt:  now,
+				isDead:     tab.IsDead,
+				deadReason: tab.DeadReason,
+			}
+			m.deadLinkCache[tab.URL] = entry
+			m.applyDeadLinkResultToURL(tab.URL, entry)
+			if m.deadLinkInFlight[tab.URL] > 0 {
+				m.deadLinkInFlight[tab.URL]--
+				if m.deadLinkInFlight[tab.URL] == 0 {
+					delete(m.deadLinkInFlight, tab.URL)
+				}
+			}
+			if len(resultSummary) < 5 {
+				resultSummary = append(resultSummary, fmt.Sprintf("%s dead=%t reason=%s", deadLinkTarget(tab), tab.IsDead, tab.DeadReason))
+			}
+		}
+		applog.Info("deadlinks.finish", "reason", reason, "checked", len(toCheck), "durationMs", time.Since(start).Milliseconds(), "sampleResult", strings.Join(resultSummary, " ; "))
+		return msg
 	}
 }
 
 func runGitHubChecks(tabs []*types.Tab) tea.Cmd {
 	return func() tea.Msg {
+		start := time.Now()
+		applog.Info("github.analysis.start", "tabs", len(tabs))
 		analyzer.AnalyzeGitHub(tabs)
+		applog.Info("github.analysis.done", "tabs", len(tabs), "durationMs", time.Since(start).Milliseconds())
 		return githubAnalysisCompleteMsg{}
 	}
 }
 
 func runSummarizeTab(tab *types.Tab, outDir, model, host string) tea.Cmd {
 	return func() tea.Msg {
+		start := time.Now()
+		applog.Info("summarize.tab.start", "url", tab.URL, "mode", "fetch")
 		title, text, err := summarize.FetchReadable(tab.URL)
 		if err != nil {
+			applog.Error("summarize.tab.done", err, "url", tab.URL, "mode", "fetch", "durationMs", time.Since(start).Milliseconds())
 			return summarizeCompleteMsg{url: tab.URL, err: err}
 		}
 		if len(strings.TrimSpace(text)) < 50 {
+			err := fmt.Errorf("not enough readable content")
+			applog.Error("summarize.tab.done", err, "url", tab.URL, "mode", "fetch", "durationMs", time.Since(start).Milliseconds())
 			return summarizeCompleteMsg{url: tab.URL, err: fmt.Errorf("not enough readable content")}
 		}
 		if title == "" {
@@ -354,6 +501,7 @@ func runSummarizeTab(tab *types.Tab, outDir, model, host string) tea.Cmd {
 		ctx := context.Background()
 		sum, err := summarize.OllamaSummarize(ctx, model, host, text)
 		if err != nil {
+			applog.Error("summarize.tab.done", err, "url", tab.URL, "mode", "fetch", "durationMs", time.Since(start).Milliseconds())
 			return summarizeCompleteMsg{url: tab.URL, err: err}
 		}
 		outPath := summarize.SummaryPath(outDir, tab.URL, tab.Title)
@@ -361,17 +509,22 @@ func runSummarizeTab(tab *types.Tab, outDir, model, host string) tea.Cmd {
 		content := fmt.Sprintf("# %s\n\n**Source:** %s\n**Summarized:** %s\n\n## Summary\n\n%s\n",
 			title, tab.URL, time.Now().Format("2006-01-02"), sum)
 		if err := os.WriteFile(outPath, []byte(content), 0o644); err != nil {
+			applog.Error("summarize.tab.done", err, "url", tab.URL, "mode", "fetch", "durationMs", time.Since(start).Milliseconds())
 			return summarizeCompleteMsg{url: tab.URL, err: err}
 		}
+		applog.Info("summarize.tab.done", "url", tab.URL, "mode", "fetch", "durationMs", time.Since(start).Milliseconds())
 		return summarizeCompleteMsg{url: tab.URL, summary: sum}
 	}
 }
 
 func runSummarizeWithContent(tab *types.Tab, content, outDir, model, host string) tea.Cmd {
 	return func() tea.Msg {
+		start := time.Now()
+		applog.Info("summarize.tab.start", "url", tab.URL, "mode", "content")
 		ctx := context.Background()
 		sum, err := summarize.OllamaSummarize(ctx, model, host, content)
 		if err != nil {
+			applog.Error("summarize.tab.done", err, "url", tab.URL, "mode", "content", "durationMs", time.Since(start).Milliseconds())
 			return summarizeCompleteMsg{url: tab.URL, err: err}
 		}
 		outPath := summarize.SummaryPath(outDir, tab.URL, tab.Title)
@@ -379,8 +532,10 @@ func runSummarizeWithContent(tab *types.Tab, content, outDir, model, host string
 		md := fmt.Sprintf("# %s\n\n**Source:** %s\n**Summarized:** %s\n\n## Summary\n\n%s\n",
 			tab.Title, tab.URL, time.Now().Format("2006-01-02"), sum)
 		if err := os.WriteFile(outPath, []byte(md), 0o644); err != nil {
+			applog.Error("summarize.tab.done", err, "url", tab.URL, "mode", "content", "durationMs", time.Since(start).Milliseconds())
 			return summarizeCompleteMsg{url: tab.URL, err: err}
 		}
+		applog.Info("summarize.tab.done", "url", tab.URL, "mode", "content", "durationMs", time.Since(start).Milliseconds())
 		return summarizeCompleteMsg{url: tab.URL, summary: sum}
 	}
 }
@@ -394,8 +549,11 @@ type threadMsg struct {
 
 func runSummarizeThread(items, channelID, threadTS, model, host string) tea.Cmd {
 	return func() tea.Msg {
+		start := time.Now()
+		applog.Info("summarize.thread.start", "channelID", channelID, "threadTS", threadTS)
 		var msgs []threadMsg
 		if err := json.Unmarshal([]byte(items), &msgs); err != nil {
+			applog.Error("summarize.thread.done", err, "channelID", channelID, "threadTS", threadTS, "durationMs", time.Since(start).Milliseconds())
 			return summarizeThreadCompleteMsg{channelID: channelID, threadTS: threadTS, err: fmt.Errorf("parse thread messages: %w", err)}
 		}
 		var b strings.Builder
@@ -405,8 +563,10 @@ func runSummarizeThread(items, channelID, threadTS, model, host string) tea.Cmd 
 		ctx := context.Background()
 		sum, err := summarize.OllamaThreadSummarize(ctx, model, host, b.String())
 		if err != nil {
+			applog.Error("summarize.thread.done", err, "channelID", channelID, "threadTS", threadTS, "durationMs", time.Since(start).Milliseconds())
 			return summarizeThreadCompleteMsg{channelID: channelID, threadTS: threadTS, err: err}
 		}
+		applog.Info("summarize.thread.done", "channelID", channelID, "threadTS", threadTS, "messages", len(msgs), "durationMs", time.Since(start).Milliseconds())
 		return summarizeThreadCompleteMsg{channelID: channelID, threadTS: threadTS, summary: sum, messageCount: len(msgs)}
 	}
 }
@@ -436,27 +596,47 @@ func classifyTick() tea.Cmd {
 
 func runClassifyOne(db *sql.DB, model, host string) tea.Cmd {
 	return func() tea.Msg {
+		start := time.Now()
 		sigs, err := storage.ListUnclassifiedSignals(db)
 		if err != nil || len(sigs) == 0 {
+			if err != nil {
+				applog.Error("classify.run", err, "durationMs", time.Since(start).Milliseconds())
+			}
 			return classifyDoneMsg{err: err}
 		}
 		sig := sigs[0]
+		applog.Info("classify.start", "id", sig.ID, "source", sig.Source)
 
 		// Heuristic classification for signals with kind
 		if urgency, ok := storage.ClassifyByKind(sig.Kind); ok {
 			err := storage.UpdateUrgency(db, sig.ID, urgency, "heuristic")
+			if err != nil {
+				applog.Error("classify.finish", err, "id", sig.ID, "source", sig.Source, "mode", "heuristic-kind", "durationMs", time.Since(start).Milliseconds())
+			} else {
+				applog.Info("classify.finish", "id", sig.ID, "source", sig.Source, "mode", "heuristic-kind", "urgency", urgency, "durationMs", time.Since(start).Milliseconds())
+			}
 			return classifyDoneMsg{id: sig.ID, urgency: urgency, err: err}
 		}
 
 		// Slack/Matrix without kind: default to fyi (heuristic only, no LLM)
 		if sig.Source == "slack" || sig.Source == "matrix" {
 			err := storage.UpdateUrgency(db, sig.ID, "fyi", "heuristic")
+			if err != nil {
+				applog.Error("classify.finish", err, "id", sig.ID, "source", sig.Source, "mode", "heuristic-source", "durationMs", time.Since(start).Milliseconds())
+			} else {
+				applog.Info("classify.finish", "id", sig.ID, "source", sig.Source, "mode", "heuristic-source", "urgency", "fyi", "durationMs", time.Since(start).Milliseconds())
+			}
 			return classifyDoneMsg{id: sig.ID, urgency: "fyi", err: err}
 		}
 
 		// Gmail sender/content heuristics (skip LLM for bots, digests, resolved bugs)
 		if urgency, ok := classify.ClassifyGmailHeuristic(sig.Title, sig.Preview, sig.Snippet); ok {
 			err := storage.UpdateUrgency(db, sig.ID, urgency, "heuristic")
+			if err != nil {
+				applog.Error("classify.finish", err, "id", sig.ID, "source", sig.Source, "mode", "heuristic-gmail", "durationMs", time.Since(start).Milliseconds())
+			} else {
+				applog.Info("classify.finish", "id", sig.ID, "source", sig.Source, "mode", "heuristic-gmail", "urgency", urgency, "durationMs", time.Since(start).Milliseconds())
+			}
 			return classifyDoneMsg{id: sig.ID, urgency: urgency, err: err}
 		}
 
@@ -465,11 +645,31 @@ func runClassifyOne(db *sql.DB, model, host string) tea.Cmd {
 		defer cancel()
 		urgency, err := classify.ClassifySignal(ctx, model, host, sig.Title, sig.Preview, sig.Snippet)
 		if err != nil {
+			applog.Error("classify.finish", err, "id", sig.ID, "source", sig.Source, "mode", "llm", "durationMs", time.Since(start).Milliseconds())
 			return classifyDoneMsg{id: sig.ID, err: err}
 		}
 		err = storage.UpdateUrgency(db, sig.ID, urgency, "llm")
+		if err != nil {
+			applog.Error("classify.finish", err, "id", sig.ID, "source", sig.Source, "mode", "llm", "urgency", urgency, "durationMs", time.Since(start).Milliseconds())
+		} else {
+			applog.Info("classify.finish", "id", sig.ID, "source", sig.Source, "mode", "llm", "urgency", urgency, "durationMs", time.Since(start).Milliseconds())
+		}
 		return classifyDoneMsg{id: sig.ID, urgency: urgency, err: err}
 	}
+}
+
+func sessionFingerprint(session *types.SessionData) string {
+	if session == nil {
+		return ""
+	}
+	h := fnv.New64a()
+	for _, group := range session.Groups {
+		fmt.Fprintf(h, "g|%s|%s|%s|%t\n", group.ID, group.Name, group.Color, group.Collapsed)
+	}
+	for _, tab := range session.AllTabs {
+		fmt.Fprintf(h, "t|%d|%d|%s|%s|%s|%t\n", tab.WindowIndex, tab.TabIndex, tab.GroupID, tab.URL, tab.Title, tab.Pinned)
+	}
+	return fmt.Sprintf("%016x", h.Sum64())
 }
 
 func runReconcileSignals(db *sql.DB, source string, account string, items []signal.SignalItem, capturedAt time.Time) tea.Cmd {
@@ -591,15 +791,21 @@ func (m *Model) refreshSignalStateAfterEntityUpdate(cmd tea.Cmd) tea.Cmd {
 // refreshGitHubEntitiesCmd triggers a background gh refresh (respects cooldown).
 func refreshGitHubEntitiesCmd(db *sql.DB) tea.Cmd {
 	return func() tea.Msg {
+		start := time.Now()
 		token := resolveGHToken()
 		if token == "" {
 			return nil
 		}
 		entities, err := storage.ListGitHubEntities(db, storage.GitHubFilter{})
 		if err != nil || len(entities) == 0 {
+			if err != nil {
+				applog.Error("github.refresh.cmd", err, "durationMs", time.Since(start).Milliseconds())
+			}
 			return nil
 		}
+		applog.Info("github.refresh.cmd.start", "entities", len(entities))
 		github.RefreshEntities(db, entities, token, false)
+		applog.Info("github.refresh.cmd.done", "entities", len(entities), "durationMs", time.Since(start).Milliseconds())
 		return githubRefreshDoneMsg{}
 	}
 }
@@ -607,11 +813,17 @@ func refreshGitHubEntitiesCmd(db *sql.DB) tea.Cmd {
 // refreshBugzillaEntitiesCmd triggers a background Bugzilla REST refresh (respects cooldown).
 func refreshBugzillaEntitiesCmd(db *sql.DB) tea.Cmd {
 	return func() tea.Msg {
+		start := time.Now()
 		entities, err := storage.ListBugzillaEntities(db)
 		if err != nil || len(entities) == 0 {
+			if err != nil {
+				applog.Error("bugzilla.refresh.cmd", err, "durationMs", time.Since(start).Milliseconds())
+			}
 			return nil
 		}
+		applog.Info("bugzilla.refresh.cmd.start", "entities", len(entities))
 		bugzilla.RefreshEntities(db, entities, false)
+		applog.Info("bugzilla.refresh.cmd.done", "entities", len(entities), "durationMs", time.Since(start).Milliseconds())
 		return bugzillaRefreshDoneMsg{}
 	}
 }
@@ -1023,11 +1235,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		activityCmd := m.activityView.LoadPeriods()
 		snapshotsCmd := m.snapshotsView.LoadAll()
+		deadLinkCmd := m.deadLinkCmd(m.session.AllTabs, "session-load")
 
-		m.tabsView.deadChecking = true
+		m.tabsView.deadChecking = deadLinkCmd != nil
 		m.tabsView.githubChecking = true
 		return m, tea.Batch(
-			runDeadLinkChecks(m.session.AllTabs),
+			deadLinkCmd,
 			runGitHubChecks(m.session.AllTabs),
 			extractBugzillaFromSessionTabs(m.db, m.session),
 			activityCmd,
@@ -1169,6 +1382,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case wsSnapshotMsg:
 		m.loading = false
 		m.connected = true
+		fingerprint := sessionFingerprint(msg.data)
+		isDuplicateSnapshot := fingerprint != "" && fingerprint == m.lastSnapshotFingerprint
+		sinceLastSnapshot := int64(-1)
+		if !m.lastSnapshotAt.IsZero() {
+			sinceLastSnapshot = time.Since(m.lastSnapshotAt).Milliseconds()
+		}
+		applog.Info("tui.snapshot.recv", "tabs", len(msg.data.AllTabs), "groups", len(msg.data.Groups), "fingerprint", fingerprint, "duplicate", isDuplicateSnapshot, "sinceLastMs", sinceLastSnapshot)
+		m.lastSnapshotFingerprint = fingerprint
+		m.lastSnapshotAt = time.Now()
 		m.session = msg.data
 		m.tabsView.session = m.session
 		m.tabsView.mode = m.mode
@@ -1180,11 +1402,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabsView.stats = analyzer.ComputeStats(m.session)
 		m.tabsView.RebuildTree()
 		m.tabsView.tree.NoteCounts, _ = storage.NoteCountsByURL(m.db)
+		deadLinkCmd := m.deadLinkCmd(m.session.AllTabs, "ws-snapshot")
 
-		m.tabsView.deadChecking = true
+		m.tabsView.deadChecking = deadLinkCmd != nil
 		m.tabsView.githubChecking = true
+		if isDuplicateSnapshot {
+			m.tabsView.deadChecking = false
+			m.tabsView.githubChecking = false
+			applog.Info("tui.snapshot.skipHeavy", "reason", "duplicate-fingerprint", "fingerprint", fingerprint)
+			return m, tea.Batch(
+				listenWebSocket(m.server),
+				m.scheduleSignalPoll(),
+				m.scheduleClassify(),
+			)
+		}
 		return m, tea.Batch(
-			runDeadLinkChecks(m.session.AllTabs),
+			deadLinkCmd,
 			runGitHubChecks(m.session.AllTabs),
 			extractBugzillaFromSessionTabs(m.db, m.session),
 			m.activityView.RefreshPeriods(),
@@ -1261,14 +1494,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case wsTabCreatedMsg:
 		if m.session != nil {
 			m.addTab(msg.tab)
-			return m, tea.Batch(listenWebSocket(m.server), m.scheduleRebuild())
+			deadLinkCmd := m.deadLinkCmd([]*types.Tab{msg.tab}, "tab-created")
+			if deadLinkCmd != nil {
+				m.tabsView.deadChecking = true
+			}
+			return m, tea.Batch(listenWebSocket(m.server), m.scheduleRebuild(), deadLinkCmd)
 		}
 		return m, listenWebSocket(m.server)
 
 	case wsTabUpdatedMsg:
 		if m.session != nil {
-			m.updateTab(msg.tab)
-			return m, tea.Batch(listenWebSocket(m.server), m.scheduleRebuild())
+			checkedTab := m.updateTab(msg.tab)
+			deadLinkCmd := m.deadLinkCmd([]*types.Tab{checkedTab}, "tab-updated")
+			if deadLinkCmd != nil {
+				m.tabsView.deadChecking = true
+			}
+			return m, tea.Batch(listenWebSocket(m.server), m.scheduleRebuild(), deadLinkCmd)
 		}
 		return m, listenWebSocket(m.server)
 
@@ -1818,9 +2059,11 @@ func (m Model) View() string {
 // --- Session mutation helpers ---
 
 func (m *Model) removeTab(browserID int) {
+	removedURL := ""
 	for _, g := range m.session.Groups {
 		for i, t := range g.Tabs {
 			if t.BrowserID == browserID {
+				removedURL = t.URL
 				g.Tabs = append(g.Tabs[:i], g.Tabs[i+1:]...)
 				break
 			}
@@ -1833,9 +2076,22 @@ func (m *Model) removeTab(browserID int) {
 		}
 	}
 	delete(m.tabsView.selected, browserID)
+	if removedURL != "" {
+		stillPresent := false
+		for _, t := range m.session.AllTabs {
+			if t.URL == removedURL {
+				stillPresent = true
+				break
+			}
+		}
+		if !stillPresent {
+			delete(m.deadLinkCache, removedURL)
+		}
+	}
 }
 
-func (m *Model) addTab(tab *types.Tab) {
+func (m *Model) addTab(tab *types.Tab) *types.Tab {
+	m.applyDeadLinkCache(tab)
 	m.session.AllTabs = append(m.session.AllTabs, tab)
 	placed := false
 	if tab.GroupID != "" {
@@ -1861,24 +2117,34 @@ func (m *Model) addTab(tab *types.Tab) {
 			m.session.Groups = append(m.session.Groups, ug)
 		}
 	}
+	return tab
 }
 
-func (m *Model) updateTab(tab *types.Tab) {
+func (m *Model) updateTab(tab *types.Tab) *types.Tab {
 	for _, t := range m.session.AllTabs {
 		if t.BrowserID == tab.BrowserID {
+			oldURL := t.URL
 			t.URL = tab.URL
 			t.Title = tab.Title
 			t.LastAccessed = tab.LastAccessed
 			t.Favicon = tab.Favicon
 			t.TabIndex = tab.TabIndex
+			t.Pinned = tab.Pinned
+			if oldURL != tab.URL {
+				t.IsDead = false
+				t.DeadReason = ""
+				m.applyDeadLinkCache(t)
+			} else {
+				m.applyDeadLinkCache(t)
+			}
 			if t.GroupID != tab.GroupID {
 				m.removeTab(tab.BrowserID)
-				m.addTab(tab)
+				return m.addTab(tab)
 			}
-			return
+			return t
 		}
 	}
-	m.addTab(tab)
+	return m.addTab(tab)
 }
 
 func (m *Model) findTabByBrowserID(browserID int) *types.Tab {

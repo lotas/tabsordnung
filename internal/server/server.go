@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	"github.com/lotas/tabsordnung/internal/applog"
 	"nhooyr.io/websocket"
@@ -105,6 +106,17 @@ type Server struct {
 	mu      sync.Mutex
 	conn    *websocket.Conn
 	connCtx context.Context
+	send    atomic.Int64
+	recv    atomic.Int64
+	dropped atomic.Int64
+}
+
+type Stats struct {
+	Connected  bool
+	Send       int64
+	Recv       int64
+	Dropped    int64
+	QueueDepth int
 }
 
 // New creates a new Server. Port 0 means the caller manages the listener.
@@ -148,7 +160,24 @@ func (s *Server) Send(msg OutgoingMsg) error {
 	if err != nil {
 		return err
 	}
-	return conn.Write(ctx, websocket.MessageText, data)
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		return err
+	}
+	s.send.Add(1)
+	return nil
+}
+
+func (s *Server) Stats() Stats {
+	s.mu.Lock()
+	connected := s.conn != nil
+	s.mu.Unlock()
+	return Stats{
+		Connected:  connected,
+		Send:       s.send.Load(),
+		Recv:       s.recv.Load(),
+		Dropped:    s.dropped.Load(),
+		QueueDepth: len(s.msgs),
+	}
 }
 
 // Handler returns an http.Handler that accepts WebSocket upgrades.
@@ -199,9 +228,11 @@ func (s *Server) Handler() http.Handler {
 				continue
 			}
 			applog.Info("ws.recv", "type", msg.Type)
+			s.recv.Add(1)
 			select {
 			case s.msgs <- msg:
 			default:
+				s.dropped.Add(1)
 			}
 		}
 	})

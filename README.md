@@ -52,6 +52,20 @@ tabsordnung [--profile X] [--stale-days N] [--live] [--port N]
 | `--live` | false | Start in live mode (connect to extension) |
 | `--port` | 19191 | WebSocket port for live mode |
 
+Live-mode diagnostics are available via environment variables:
+
+- `TABSORDNUNG_DIAG_INTERVAL=10s` logs periodic runtime stats to `tabsordnung.log`.
+- `TABSORDNUNG_DIAG_INTERVAL=0` disables those periodic diagnostics.
+- `TABSORDNUNG_PPROF_ADDR=127.0.0.1:6060` starts a local pprof server for heap/goroutine/profile capture.
+
+Example:
+
+```bash
+TABSORDNUNG_DIAG_INTERVAL=10s \
+TABSORDNUNG_PPROF_ADDR=127.0.0.1:6060 \
+tabsordnung --live
+```
+
 ### Export
 
 ```

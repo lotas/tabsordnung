@@ -17,6 +17,7 @@ import (
 	"github.com/lotas/tabsordnung/internal/analyzer"
 	"github.com/lotas/tabsordnung/internal/applog"
 	"github.com/lotas/tabsordnung/internal/classify"
+	"github.com/lotas/tabsordnung/internal/diag"
 	"github.com/lotas/tabsordnung/internal/export"
 	"github.com/lotas/tabsordnung/internal/firefox"
 	"github.com/lotas/tabsordnung/internal/server"
@@ -136,6 +137,17 @@ func main() {
 	}
 	defer applog.Close()
 
+	if *liveMode {
+		if interval, enabled, err := diag.ParseInterval(os.Getenv("TABSORDNUNG_DIAG_INTERVAL")); err == nil {
+			if enabled {
+				diag.StartRuntimeLogger(context.Background(), interval, srv)
+			}
+		} else {
+			applog.Error("diag.interval", err, "value", os.Getenv("TABSORDNUNG_DIAG_INTERVAL"))
+		}
+		diag.StartPprofServer(os.Getenv("TABSORDNUNG_PPROF_ADDR"))
+	}
+
 	model := tui.NewModel(profiles, *staleDays, *liveMode, srv, summaryDir, resolvedModel, ollamaHost, db)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
@@ -204,6 +216,8 @@ Environment:
   TABSORDNUNG_PROFILE    Default Firefox profile (overridden by --profile flag)
   TABSORDNUNG_MODEL      Default Ollama model (overridden by --model flag)
   OLLAMA_HOST            Ollama server URL (default: http://localhost:11434)
+  TABSORDNUNG_DIAG_INTERVAL  Live-mode runtime logging interval (default: 30s; set 0/off to disable)
+  TABSORDNUNG_PPROF_ADDR     Optional local pprof server address, e.g. 127.0.0.1:6060
 `)
 }
 

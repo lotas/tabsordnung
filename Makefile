@@ -15,6 +15,9 @@ run: build
 run-live: build
 	./$(BINARY) --live
 
+run-profile: build
+	TABSORDNUNG_DIAG_INTERVAL=10s  TABSORDNUNG_PPROF_ADDR=127.0.0.1:6060 ./$(BINARY) --live
+
 clean:
 	rm -f $(BINARY)
 
