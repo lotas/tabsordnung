@@ -22,6 +22,7 @@ let pendingVisitBatch = null; // { id, count }
 let idleState = "active";
 // Per-tab summarize state: "idle" | "pending" | "ready"
 let tabSummarizeState = new Map();
+let tabAutoSummarized = new Set();
 let notesCache = new Map(); // tabId → [notes]
 
 function connect() {
@@ -167,6 +168,7 @@ browser.tabs.onRemoved.addListener((tabId) => {
   ensureConnected();
   send({ type: "tab.removed", tabId });
   tabSummarizeState.delete(tabId);
+  tabAutoSummarized.delete(tabId);
 });
 
 browser.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
@@ -182,7 +184,9 @@ browser.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   }
   // Reset dwell timer if the active tab navigated to a new URL
   if (changeInfo.url && tab.active) {
-    tabSummarizeState.delete(tab.id);
+    if (!tabAutoSummarized.has(tab.id)) {
+      tabSummarizeState.delete(tab.id);
+    }
     notesCache.delete(tab.id);
     updateIcon(tab.id);
     startDwellTimer(tab.id, tab.url);
@@ -957,6 +961,7 @@ function startDwellTimer(tabId, url) {
   clearDwellTimer();
   if (shouldSkipURL(url)) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (tabAutoSummarized.has(tabId)) return;
   const currentState = tabSummarizeState.get(tabId);
   if (currentState === "ready" || currentState === "pending") return;
 
@@ -969,6 +974,7 @@ function startDwellTimer(tabId, url) {
 
 function sendAutoSummarize(tabId, url) {
   const id = nextPopupCmdID();
+  tabAutoSummarized.add(tabId);
   tabSummarizeState.set(tabId, "pending");
   updateIcon(tabId);
 
