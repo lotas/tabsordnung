@@ -24,15 +24,16 @@ func TestBuildEntityGraphQLQuery(t *testing.T) {
 		t.Errorf("aliasMap has %d entries, want 3", len(aliasMap))
 	}
 
-	// Verify query contains expected fragments
-	if !strings.Contains(query, "pullRequest(number: 123)") {
-		t.Errorf("query missing pullRequest(number: 123):\n%s", query)
+	// Verify query contains expected union lookups. issueOrPullRequest avoids
+	// losing data when a signal-derived entity has the wrong cached kind.
+	if !strings.Contains(query, "issueOrPullRequest(number: 123)") {
+		t.Errorf("query missing issueOrPullRequest(number: 123):\n%s", query)
 	}
-	if !strings.Contains(query, "issue(number: 456)") {
-		t.Errorf("query missing issue(number: 456):\n%s", query)
+	if !strings.Contains(query, "issueOrPullRequest(number: 456)") {
+		t.Errorf("query missing issueOrPullRequest(number: 456):\n%s", query)
 	}
-	if !strings.Contains(query, "pullRequest(number: 7)") {
-		t.Errorf("query missing pullRequest(number: 7):\n%s", query)
+	if !strings.Contains(query, "issueOrPullRequest(number: 7)") {
+		t.Errorf("query missing issueOrPullRequest(number: 7):\n%s", query)
 	}
 
 	// Verify query has proper structure: query { ... repository(...) { ... } ... }
@@ -50,11 +51,12 @@ func TestBuildEntityGraphQLQuery(t *testing.T) {
 	if !strings.Contains(query, "statusCheckRollup") {
 		t.Errorf("query missing statusCheckRollup for PRs:\n%s", query)
 	}
-
-	// Verify issue fields do NOT include reviewDecision
-	// The issue block is between "issue(number: 456)" and the next "}"
-	// We check the full query doesn't have reviewDecision right after issue fields
-	// (This is implicitly tested by the structure)
+	if !strings.Contains(query, "... on Issue") {
+		t.Errorf("query missing Issue fragment:\n%s", query)
+	}
+	if !strings.Contains(query, "... on PullRequest") {
+		t.Errorf("query missing PullRequest fragment:\n%s", query)
+	}
 
 	// Verify both repos are in the query
 	if !strings.Contains(query, `"gecko-dev"`) {
@@ -88,6 +90,7 @@ func TestBuildEntityGraphQLQuery_Empty(t *testing.T) {
 
 func TestToStatusUpdate(t *testing.T) {
 	result := EntityRefreshResult{
+		Kind:         "pull",
 		State:        "OPEN",
 		Title:        "Fix bug",
 		Author:       "octocat",
@@ -101,6 +104,9 @@ func TestToStatusUpdate(t *testing.T) {
 	// Verify state is normalized to lowercase
 	if update.State != "open" {
 		t.Errorf("State = %q, want %q", update.State, "open")
+	}
+	if update.Kind != "pull" {
+		t.Errorf("Kind = %q, want %q", update.Kind, "pull")
 	}
 
 	// Verify title and author are passed through

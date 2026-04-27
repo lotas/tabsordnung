@@ -13,10 +13,14 @@ import (
 	"github.com/lotas/tabsordnung/internal/storage"
 )
 
-const refreshCooldown = 10 * time.Minute
+const (
+	refreshCooldown  = 10 * time.Minute
+	refreshBatchSize = 50
+)
 
 // EntityRefreshResult holds parsed GraphQL response data for a single entity.
 type EntityRefreshResult struct {
+	Kind         string // "pull" or "issue"
 	State        string // "OPEN", "CLOSED", "MERGED"
 	Title        string
 	Author       string
@@ -33,6 +37,7 @@ func (r EntityRefreshResult) ToStatusUpdate() storage.GitHubStatusUpdate {
 	update := storage.GitHubStatusUpdate{
 		Title:     r.Title,
 		State:     strings.ToLower(r.State),
+		Kind:      r.Kind,
 		Author:    r.Author,
 		Assignees: strings.Join(r.Assignees, ","),
 	}
@@ -121,14 +126,12 @@ func BuildEntityGraphQLQuery(refs []EntityRef) (string, map[string]int) {
 		b.WriteString(fmt.Sprintf(" %s: repository(owner: %q, name: %q) {", repoAlias, rg.owner, rg.repo))
 
 		for ii, item := range rg.items {
-			var itemAlias string
-			if item.ref.Kind == "issue" {
-				itemAlias = fmt.Sprintf("i%d", ii)
-				b.WriteString(fmt.Sprintf(" %s: issue(number: %d) { state title author { login } updatedAt assignees(first: 10) { nodes { login } } }", itemAlias, item.ref.Number))
-			} else {
-				itemAlias = fmt.Sprintf("p%d", ii)
-				b.WriteString(fmt.Sprintf(" %s: pullRequest(number: %d) { state title author { login } updatedAt assignees(first: 10) { nodes { login } } reviewDecision statusCheckRollup { state } }", itemAlias, item.ref.Number))
-			}
+			itemAlias := fmt.Sprintf("e%d", ii)
+			b.WriteString(fmt.Sprintf(
+				" %s: issueOrPullRequest(number: %d) { __typename ... on Issue { state title author { login } updatedAt assignees(first: 10) { nodes { login } } } ... on PullRequest { state title author { login } updatedAt assignees(first: 10) { nodes { login } } reviewDecision statusCheckRollup { state } } }",
+				itemAlias,
+				item.ref.Number,
+			))
 			aliasMap[repoAlias+"."+itemAlias] = item.index
 		}
 
@@ -141,9 +144,10 @@ func BuildEntityGraphQLQuery(refs []EntityRef) (string, map[string]int) {
 
 // refreshItemResponse is the response shape for a single issue or PR from GraphQL.
 type refreshItemResponse struct {
-	State  string `json:"state"`
-	Title  string `json:"title"`
-	Author *struct {
+	Typename string `json:"__typename"`
+	State    string `json:"state"`
+	Title    string `json:"title"`
+	Author   *struct {
 		Login string `json:"login"`
 	} `json:"author"`
 	UpdatedAt string `json:"updatedAt"`
@@ -200,17 +204,40 @@ func RefreshEntities(db *sql.DB, entities []storage.GitHubEntity, token string, 
 
 	applog.Info("github.refresh", "count", len(filteredRefs))
 
-	// Build and execute GraphQL query
-	query, aliasMap := BuildEntityGraphQLQuery(filteredRefs)
+	updated := 0
+	for start := 0; start < len(filteredRefs); start += refreshBatchSize {
+		end := start + refreshBatchSize
+		if end > len(filteredRefs) {
+			end = len(filteredRefs)
+		}
+		batchEntities := filtered[start:end]
+		batchRefs := filteredRefs[start:end]
+
+		n, err := refreshEntityBatch(db, batchEntities, batchRefs, token)
+		if err != nil {
+			return err
+		}
+		updated += n
+	}
+
+	applog.Info("github.refresh.done", "updated", updated, "total", len(filteredRefs))
+	if _, err := storage.AutoCompleteSignalsForClosedEntities(db); err != nil {
+		applog.Error("github.refresh.signals", err)
+	}
+	return nil
+}
+
+func refreshEntityBatch(db *sql.DB, entities []storage.GitHubEntity, refs []EntityRef, token string) (int, error) {
+	query, aliasMap := BuildEntityGraphQLQuery(refs)
 
 	body, err := json.Marshal(map[string]string{"query": query})
 	if err != nil {
-		return fmt.Errorf("marshal graphql query: %w", err)
+		return 0, fmt.Errorf("marshal graphql query: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", "https://api.github.com/graphql", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -218,24 +245,24 @@ func RefreshEntities(db *sql.DB, entities []storage.GitHubEntity, token string, 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("graphql request: %w", err)
+		return 0, fmt.Errorf("graphql request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("graphql response status: %d", resp.StatusCode)
+		return 0, fmt.Errorf("graphql response status: %d", resp.StatusCode)
 	}
 
 	var gqlResp refreshGraphQLResponse
 	if err := json.NewDecoder(resp.Body).Decode(&gqlResp); err != nil {
-		return fmt.Errorf("decode graphql response: %w", err)
+		return 0, fmt.Errorf("decode graphql response: %w", err)
 	}
 
 	if len(gqlResp.Errors) > 0 {
 		applog.Info("github.refresh.errors", "count", len(gqlResp.Errors), "first", gqlResp.Errors[0].Message)
 	}
 
-	// Parse nested response: data.r0.p0, data.r0.i1, etc.
+	// Parse nested response: data.r0.e0, data.r0.e1, etc.
 	results := make(map[int]EntityRefreshResult)
 	for repoAlias, repoRaw := range gqlResp.Data {
 		var items map[string]json.RawMessage
@@ -246,6 +273,9 @@ func RefreshEntities(db *sql.DB, entities []storage.GitHubEntity, token string, 
 			fullAlias := repoAlias + "." + itemAlias
 			idx, ok := aliasMap[fullAlias]
 			if !ok {
+				continue
+			}
+			if string(itemRaw) == "null" {
 				continue
 			}
 
@@ -259,6 +289,15 @@ func RefreshEntities(db *sql.DB, entities []storage.GitHubEntity, token string, 
 				State:     item.State,
 				Title:     item.Title,
 				UpdatedAt: item.UpdatedAt,
+			}
+			switch item.Typename {
+			case "PullRequest":
+				result.Kind = "pull"
+			case "Issue":
+				result.Kind = "issue"
+			}
+			if result.State == "" && result.Title == "" {
+				continue
 			}
 
 			if item.Author != nil {
@@ -285,7 +324,7 @@ func RefreshEntities(db *sql.DB, entities []storage.GitHubEntity, token string, 
 
 	// Apply updates to storage
 	for idx, result := range results {
-		entity := filtered[idx]
+		entity := entities[idx]
 		update := result.ToStatusUpdate()
 
 		// Detect state change and record event
@@ -303,9 +342,5 @@ func RefreshEntities(db *sql.DB, entities []storage.GitHubEntity, token string, 
 		}
 	}
 
-	applog.Info("github.refresh.done", "updated", len(results), "total", len(filteredRefs))
-	if _, err := storage.AutoCompleteSignalsForClosedEntities(db); err != nil {
-		applog.Error("github.refresh.signals", err)
-	}
-	return nil
+	return len(results), nil
 }

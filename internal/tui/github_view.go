@@ -435,7 +435,10 @@ func (v GitHubView) ViewList() string {
 				}
 			}
 
-			title := e.Title
+			title := strings.TrimSpace(e.Title)
+			if title == "" {
+				title = "(untitled)"
+			}
 			badgeLen := 0
 			if ciBadge != "" {
 				badgeLen = 2 // badge char + space

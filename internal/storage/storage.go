@@ -480,6 +480,12 @@ func runMigrations(db *sql.DB) error {
 		// Table exists but is empty — backfill from existing data
 		BackfillGitHubEntities(db)
 	}
+	var ghMissingMetadata int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM github_entities WHERE trim(coalesce(title, '')) = '' OR kind = ''`).Scan(&ghMissingMetadata); err == nil && ghMissingMetadata > 0 {
+		// Older GitHub extraction only stored owner/repo/number/kind. Recover
+		// titles and authoritative kinds from local snapshots/signals when possible.
+		BackfillGitHubEntityMetadata(db)
+	}
 	var bzCount int
 	if err := db.QueryRow("SELECT COUNT(*) FROM bugzilla_entities").Scan(&bzCount); err == nil && bzCount == 0 {
 		// Table exists but is empty — backfill from existing data

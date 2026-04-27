@@ -377,9 +377,9 @@ func TestExtractGitHubFromSnapshot(t *testing.T) {
 
 	// Create a snapshot with GitHub tabs
 	_, err := CreateSnapshot(db, "default", nil, []SnapshotTab{
-		{URL: "https://github.com/mozilla/gecko-dev/pull/123", Title: "Fix bug"},
+		{URL: "https://github.com/mozilla/gecko-dev/pull/123", Title: "Fix bug by octocat · Pull Request #123 · mozilla/gecko-dev"},
 		{URL: "https://mail.google.com/inbox", Title: "Gmail"},
-		{URL: "https://github.com/org/repo/issues/42", Title: "Feature request"},
+		{URL: "https://github.com/org/repo/issues/42", Title: "Feature request · Issue #42 · org/repo"},
 	}, "")
 	if err != nil {
 		t.Fatalf("CreateSnapshot: %v", err)
@@ -401,6 +401,18 @@ func TestExtractGitHubFromSnapshot(t *testing.T) {
 	if len(entities) != 2 {
 		t.Fatalf("expected 2 entities, got %d", len(entities))
 	}
+	for _, e := range entities {
+		switch e.Number {
+		case 123:
+			if e.Title != "Fix bug" {
+				t.Errorf("pull title = %q, want %q", e.Title, "Fix bug")
+			}
+		case 42:
+			if e.Title != "Feature request" {
+				t.Errorf("issue title = %q, want %q", e.Title, "Feature request")
+			}
+		}
+	}
 }
 
 func TestExtractGitHubFromSignals(t *testing.T) {
@@ -411,7 +423,7 @@ func TestExtractGitHubFromSignals(t *testing.T) {
 	InsertSignal(db, SignalRecord{
 		Source:     "gmail",
 		Title:      "dependabot",
-		Preview:    "[mozilla/gecko-dev] Bump lodash (#1234)",
+		Preview:    "[mozilla/gecko-dev] Bump lodash (PR #1234)",
 		SourceTS:   "2:30 PM",
 		CapturedAt: now,
 	})
@@ -446,6 +458,16 @@ func TestExtractGitHubFromSignals(t *testing.T) {
 	if len(entities) != 2 {
 		t.Fatalf("expected 2 entities, got %d", len(entities))
 	}
+	for _, e := range entities {
+		if e.Owner == "mozilla" && e.Repo == "gecko-dev" {
+			if e.Kind != "pull" {
+				t.Errorf("subject kind = %q, want pull", e.Kind)
+			}
+			if e.Title != "Bump lodash" {
+				t.Errorf("subject title = %q, want Bump lodash", e.Title)
+			}
+		}
+	}
 }
 
 func TestGetGitHubEntity_NotFound(t *testing.T) {
@@ -465,17 +487,17 @@ func TestBackfillGitHubEntities(t *testing.T) {
 
 	// Create snapshots with GitHub tabs
 	CreateSnapshot(db, "default", nil, []SnapshotTab{
-		{URL: "https://github.com/mozilla/gecko-dev/pull/1", Title: "PR 1"},
+		{URL: "https://github.com/mozilla/gecko-dev/pull/1", Title: "PR 1 by octocat · Pull Request #1 · mozilla/gecko-dev"},
 		{URL: "https://example.com", Title: "Example"},
 	}, "")
 	CreateSnapshot(db, "default", nil, []SnapshotTab{
-		{URL: "https://github.com/mozilla/gecko-dev/pull/1", Title: "PR 1"},
-		{URL: "https://github.com/mozilla/gecko-dev/issues/2", Title: "Issue 2"},
+		{URL: "https://github.com/mozilla/gecko-dev/pull/1", Title: "PR 1 by octocat · Pull Request #1 · mozilla/gecko-dev"},
+		{URL: "https://github.com/mozilla/gecko-dev/issues/2", Title: "Issue 2 · Issue #2 · mozilla/gecko-dev"},
 	}, "")
 
 	// Insert a signal referencing GitHub
 	InsertSignal(db, SignalRecord{
-		Source: "gmail", Title: "bot", Preview: "[org/repo] Fix (#99)",
+		Source: "gmail", Title: "bot", Preview: "[org/repo] Fix (Issue #99)",
 		SourceTS: "1:00 PM", CapturedAt: time.Now(),
 	})
 
@@ -494,6 +516,14 @@ func TestBackfillGitHubEntities(t *testing.T) {
 	entities, _ := ListGitHubEntities(db, GitHubFilter{})
 	if len(entities) != 3 {
 		t.Fatalf("expected 3 entities in db, got %d", len(entities))
+	}
+	for _, e := range entities {
+		if e.Title == "" {
+			t.Errorf("expected title to be backfilled for %+v", e)
+		}
+		if e.Owner == "org" && e.Repo == "repo" && e.Kind != "issue" {
+			t.Errorf("signal kind = %q, want issue", e.Kind)
+		}
 	}
 
 	// Running again should not duplicate

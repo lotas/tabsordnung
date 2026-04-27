@@ -52,6 +52,7 @@ type GitHubFilter struct {
 type GitHubStatusUpdate struct {
 	Title        string
 	State        string
+	Kind         string
 	Author       string
 	Assignees    string
 	ReviewStatus *string
@@ -242,11 +243,14 @@ func ListGitHubEntityEvents(db *sql.DB, entityID int64) ([]GitHubEntityEvent, er
 func UpdateGitHubEntityStatus(db *sql.DB, id int64, update GitHubStatusUpdate) error {
 	res, err := db.Exec(
 		`UPDATE github_entities
-		 SET title = ?, state = ?, author = ?, assignees = ?,
+		 SET title = CASE WHEN ? <> '' THEN ? ELSE title END,
+		     state = CASE WHEN ? <> '' THEN ? ELSE state END,
+		     kind = CASE WHEN ? <> '' THEN ? ELSE kind END,
+		     author = ?, assignees = ?,
 		     review_status = ?, checks_status = ?,
 		     gh_updated_at = ?, last_refreshed_at = CURRENT_TIMESTAMP
 		 WHERE id = ?`,
-		update.Title, update.State, update.Author, update.Assignees,
+		update.Title, update.Title, update.State, update.State, update.Kind, update.Kind, update.Author, update.Assignees,
 		update.ReviewStatus, update.ChecksStatus,
 		update.GHUpdatedAt, id,
 	)
@@ -452,10 +456,10 @@ func GitHubEntityURL(owner, repo, kind string, number int) string {
 }
 
 func entityURLPath(kind string) string {
-	if kind == "issue" {
-		return "issues"
+	if kind == "pull" {
+		return "pull"
 	}
-	return "pull"
+	return "issues"
 }
 
 // ghRef holds the parsed components of a GitHub issue/PR URL.
@@ -464,6 +468,7 @@ type ghRef struct {
 	repo   string
 	number int
 	kind   string
+	title  string
 }
 
 var ghURLPattern = regexp.MustCompile(`https?://github\.com/([^/]+)/([^/]+)/(issues|pull)/(\d+)`)
@@ -481,8 +486,10 @@ func extractGitHubRef(rawURL string) *ghRef {
 	return &ghRef{owner: matches[1], repo: matches[2], number: num, kind: kind}
 }
 
-// signalGHSubjectPattern matches [owner/repo] ... (#123) in email subjects.
-var signalGHSubjectPattern = regexp.MustCompile(`\[([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)\].*#(\d+)`)
+// signalGHSubjectPattern matches GitHub notification subjects such as:
+// [owner/repo] Fix thing (PR #123), [owner/repo] Fix thing (Issue #123), or
+// [owner/repo] Fix thing (#123).
+var signalGHSubjectPattern = regexp.MustCompile(`(?i)\[([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)\]\s*(.*?)\s*\((?:(PR|Issue)\s*)?#(\d+)\)`)
 
 // ExtractGitHubFromSignals scans signal fields for GitHub references and upserts entities.
 // Returns the number of entities found.
@@ -493,14 +500,11 @@ func ExtractGitHubFromSignals(db *sql.DB, signals []SignalRecord) (int, error) {
 		if ref == nil {
 			continue
 		}
-		kind := ref.kind
-		if kind == "" {
-			kind = "pull" // default, will be resolved by gh refresh
-		}
-		id, _, err := UpsertGitHubEntity(db, ref.owner, ref.repo, ref.number, kind, "signal")
+		id, _, err := UpsertGitHubEntity(db, ref.owner, ref.repo, ref.number, ref.kind, "signal")
 		if err != nil {
 			continue
 		}
+		_ = updateGitHubEntityLocalMetadata(db, id, ref.title, ref.kind)
 		sigID := sig.ID
 		_ = RecordGitHubEvent(db, id, "signal_seen", &sigID, nil, "")
 		count++
@@ -510,33 +514,181 @@ func ExtractGitHubFromSignals(db *sql.DB, signals []SignalRecord) (int, error) {
 
 func extractGitHubFromSignalRecord(sig SignalRecord) *ghRef {
 	// Try subject pattern: [owner/repo] ... (#123)
+	var subjectRef *ghRef
 	for _, text := range []string{sig.Preview, sig.Title} {
-		matches := signalGHSubjectPattern.FindStringSubmatch(text)
-		if matches != nil {
-			num, _ := strconv.Atoi(matches[2])
-			ownerRepo := matches[1]
-			for i, c := range ownerRepo {
-				if c == '/' {
-					return &ghRef{
-						owner:  ownerRepo[:i],
-						repo:   ownerRepo[i+1:],
-						number: num,
-						kind:   "", // unknown from subject
-					}
-				}
-			}
+		if ref := extractGitHubSubjectRef(text); ref != nil {
+			subjectRef = ref
+			break
 		}
 	}
 
-	// Try raw URL in snippet or preview
+	// Try raw URL in snippet or preview. This is authoritative for kind and can
+	// complete a subject-derived ref that only had a title/number.
 	for _, text := range []string{sig.Snippet, sig.Preview} {
 		ref := extractGitHubRef(text)
 		if ref != nil {
+			if subjectRef != nil && subjectRef.owner == ref.owner && subjectRef.repo == ref.repo && subjectRef.number == ref.number {
+				subjectRef.kind = ref.kind
+				return subjectRef
+			}
 			return ref
 		}
 	}
 
+	return subjectRef
+}
+
+func extractGitHubSubjectRef(text string) *ghRef {
+	matches := signalGHSubjectPattern.FindStringSubmatch(text)
+	if matches == nil {
+		return nil
+	}
+	ownerRepo := matches[1]
+	title := strings.TrimSpace(matches[2])
+	kindMarker := strings.ToLower(matches[3])
+	num, _ := strconv.Atoi(matches[4])
+	kind := ""
+	switch kindMarker {
+	case "pr":
+		kind = "pull"
+	case "issue":
+		kind = "issue"
+	}
+	for i, c := range ownerRepo {
+		if c == '/' {
+			return &ghRef{
+				owner:  ownerRepo[:i],
+				repo:   ownerRepo[i+1:],
+				number: num,
+				kind:   kind,
+				title:  title,
+			}
+		}
+	}
 	return nil
+}
+
+func cleanGitHubTabTitle(title string, ref *ghRef) string {
+	title = strings.TrimSpace(title)
+	if title == "" || ref == nil {
+		return title
+	}
+	entity := "Issue"
+	if ref.kind == "pull" {
+		entity = "Pull Request"
+	}
+	suffix := fmt.Sprintf(" · %s #%d · %s/%s", entity, ref.number, ref.owner, ref.repo)
+	if !strings.HasSuffix(title, suffix) {
+		return title
+	}
+	title = strings.TrimSpace(strings.TrimSuffix(title, suffix))
+	if ref.kind == "pull" {
+		if idx := strings.LastIndex(title, " by "); idx > 0 {
+			title = strings.TrimSpace(title[:idx])
+		}
+	}
+	return title
+}
+
+func updateGitHubEntityLocalMetadata(db *sql.DB, id int64, title, kind string) error {
+	title = strings.TrimSpace(title)
+	kind = strings.TrimSpace(kind)
+	if title == "" && kind == "" {
+		return nil
+	}
+	_, err := db.Exec(
+		`UPDATE github_entities
+		 SET title = CASE
+		         WHEN trim(coalesce(title, '')) = '' AND ? <> '' THEN ?
+		         ELSE title
+		     END,
+		     kind = CASE
+		         WHEN ? <> '' AND kind <> ? THEN ?
+		         ELSE kind
+		     END
+		 WHERE id = ?`,
+		title, title, kind, kind, kind, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update github entity local metadata: %w", err)
+	}
+	return nil
+}
+
+func updateExistingGitHubEntityLocalMetadata(db *sql.DB, ref *ghRef) (bool, error) {
+	if ref == nil {
+		return false, nil
+	}
+	var id int64
+	err := db.QueryRow(
+		`SELECT id FROM github_entities WHERE owner = ? AND repo = ? AND number = ?`,
+		ref.owner, ref.repo, ref.number,
+	).Scan(&id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("select github entity for metadata backfill: %w", err)
+	}
+	if err := updateGitHubEntityLocalMetadata(db, id, ref.title, ref.kind); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// BackfillGitHubEntityMetadata fills titles/kinds for already-tracked entities
+// from persisted snapshot tab titles and signal subjects. It does not mark
+// entities as refreshed; API refresh is still responsible for current state.
+func BackfillGitHubEntityMetadata(db *sql.DB) (int, error) {
+	updated := 0
+
+	rows, err := db.Query(`SELECT url, title FROM snapshot_tabs`)
+	if err != nil {
+		return 0, fmt.Errorf("query snapshot tabs for github metadata: %w", err)
+	}
+	for rows.Next() {
+		var tabURL, tabTitle string
+		if err := rows.Scan(&tabURL, &tabTitle); err != nil {
+			continue
+		}
+		ref := extractGitHubRef(tabURL)
+		if ref == nil {
+			continue
+		}
+		ref.title = cleanGitHubTabTitle(tabTitle, ref)
+		ok, err := updateExistingGitHubEntityLocalMetadata(db, ref)
+		if err != nil {
+			rows.Close()
+			return updated, err
+		}
+		if ok {
+			updated++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return updated, err
+	}
+	rows.Close()
+
+	signals, err := ListSignals(db, "", "", true)
+	if err != nil {
+		return updated, fmt.Errorf("list signals for github metadata backfill: %w", err)
+	}
+	for _, sig := range signals {
+		ref := extractGitHubFromSignalRecord(sig)
+		if ref == nil {
+			continue
+		}
+		ok, err := updateExistingGitHubEntityLocalMetadata(db, ref)
+		if err != nil {
+			return updated, err
+		}
+		if ok {
+			updated++
+		}
+	}
+	return updated, nil
 }
 
 // BackfillGitHubEntities scans all existing snapshot tabs and signals for GitHub references.
@@ -546,7 +698,7 @@ func BackfillGitHubEntities(db *sql.DB) (int, error) {
 
 	// Scan all snapshot tabs, ordered by snapshot creation time (oldest first)
 	rows, err := db.Query(`
-		SELECT st.url, s.id, s.created_at
+		SELECT st.url, st.title, s.id, s.created_at
 		FROM snapshot_tabs st
 		JOIN snapshots s ON s.id = st.snapshot_id
 		ORDER BY s.created_at ASC`)
@@ -555,10 +707,10 @@ func BackfillGitHubEntities(db *sql.DB) (int, error) {
 	}
 
 	for rows.Next() {
-		var tabURL string
+		var tabURL, tabTitle string
 		var snapID int64
 		var createdAt time.Time
-		if err := rows.Scan(&tabURL, &snapID, &createdAt); err != nil {
+		if err := rows.Scan(&tabURL, &tabTitle, &snapID, &createdAt); err != nil {
 			continue
 		}
 		ref := extractGitHubRef(tabURL)
@@ -574,6 +726,7 @@ func BackfillGitHubEntities(db *sql.DB) (int, error) {
 			// Set first_seen_at to the earliest snapshot's created_at
 			db.Exec("UPDATE github_entities SET first_seen_at = ? WHERE id = ?", createdAt, id)
 		}
+		_ = updateGitHubEntityLocalMetadata(db, id, cleanGitHubTabTitle(tabTitle, ref), ref.kind)
 		if !seen[key] {
 			// Record first sighting event only
 			_ = RecordGitHubEvent(db, id, "tab_seen", nil, &snapID, "")
@@ -593,17 +746,14 @@ func BackfillGitHubEntities(db *sql.DB) (int, error) {
 			continue
 		}
 		key := fmt.Sprintf("%s/%s/%d", ref.owner, ref.repo, ref.number)
-		kind := ref.kind
-		if kind == "" {
-			kind = "pull"
-		}
-		id, isNew, err := UpsertGitHubEntity(db, ref.owner, ref.repo, ref.number, kind, "signal")
+		id, isNew, err := UpsertGitHubEntity(db, ref.owner, ref.repo, ref.number, ref.kind, "signal")
 		if err != nil {
 			continue
 		}
 		if isNew {
 			db.Exec("UPDATE github_entities SET first_seen_at = ? WHERE id = ?", sig.CapturedAt, id)
 		}
+		_ = updateGitHubEntityLocalMetadata(db, id, ref.title, ref.kind)
 		if !seen[key] {
 			sigID := sig.ID
 			_ = RecordGitHubEvent(db, id, "signal_seen", &sigID, nil, "")
@@ -617,7 +767,7 @@ func BackfillGitHubEntities(db *sql.DB) (int, error) {
 // ExtractGitHubFromSnapshot scans a snapshot's tabs for GitHub URLs and upserts entities.
 // Returns the number of entities found.
 func ExtractGitHubFromSnapshot(db *sql.DB, snapshotID int64) (int, error) {
-	rows, err := db.Query("SELECT url FROM snapshot_tabs WHERE snapshot_id = ?", snapshotID)
+	rows, err := db.Query("SELECT url, title FROM snapshot_tabs WHERE snapshot_id = ?", snapshotID)
 	if err != nil {
 		return 0, fmt.Errorf("query snapshot tabs: %w", err)
 	}
@@ -625,8 +775,8 @@ func ExtractGitHubFromSnapshot(db *sql.DB, snapshotID int64) (int, error) {
 
 	count := 0
 	for rows.Next() {
-		var tabURL string
-		if err := rows.Scan(&tabURL); err != nil {
+		var tabURL, tabTitle string
+		if err := rows.Scan(&tabURL, &tabTitle); err != nil {
 			continue
 		}
 		ref := extractGitHubRef(tabURL)
@@ -637,6 +787,7 @@ func ExtractGitHubFromSnapshot(db *sql.DB, snapshotID int64) (int, error) {
 		if err != nil {
 			continue
 		}
+		_ = updateGitHubEntityLocalMetadata(db, id, cleanGitHubTabTitle(tabTitle, ref), ref.kind)
 		_ = RecordGitHubEvent(db, id, "tab_seen", nil, &snapshotID, "")
 		count++
 	}
