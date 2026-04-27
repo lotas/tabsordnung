@@ -2,7 +2,7 @@ const PORT = 19191;
 const RECONNECT_BASE_MS = 1000;
 const ALARM_NAME = "keepalive";
 const RECONNECT_MAX_MS = 30000;
-const DWELL_THRESHOLD_MS = 10000;
+const DWELL_THRESHOLD_MS = 30000;
 const VISIT_MIN_MS = 5000;
 const IDLE_THRESHOLD_SECONDS = 60;
 const SKIP_PROTOCOLS = ["about:", "moz-extension:", "chrome:", "file:", "data:", "resource:"];
@@ -61,7 +61,7 @@ function connect() {
       browser.tabs.query({ active: true, currentWindow: true }).then(([activeTab]) => {
         if (activeTab && activeTab.id === msg.tabId) {
           updateIcon(msg.tabId);
-          browser.runtime.sendMessage({ action: "notes-updated", notes: msg.notes || [] }).catch(() => {});
+          browser.runtime.sendMessage({ action: "notes-updated", notes: msg.notes || [] }).catch(() => { });
         }
       });
       return;
@@ -387,16 +387,16 @@ async function handleCommand(msg) {
           target: { tabId: msg.tabId },
           func: () => {
             const threadPane = document.querySelector('[data-qa="threads_flexpane"]') ||
-                               document.querySelector('.p-threads_flexpane');
+              document.querySelector('.p-threads_flexpane');
             if (!threadPane) return null;
 
             const messageEls = threadPane.querySelectorAll('[data-qa="virtual-list-item"], .c-virtual_list__item');
             const messages = [];
             messageEls.forEach(el => {
               const authorEl = el.querySelector('[data-qa="message_sender_name"]') ||
-                               el.querySelector('.c-message__sender_name');
+                el.querySelector('.c-message__sender_name');
               const textEl = el.querySelector('[data-qa="message-text"]') ||
-                             el.querySelector('.p-rich_text_block');
+                el.querySelector('.p-rich_text_block');
               const timeEl = el.querySelector('time');
 
               const author = authorEl?.textContent?.trim() || "";
@@ -469,7 +469,7 @@ async function handleCommand(msg) {
               const count = badge?.textContent?.trim();
               const preview = count ? count + " unread" : "unread";
               const isDM = room.classList.contains("mx_RoomTile_dm") ||
-                           room.querySelector(".mx_DecoratedRoomAvatar_icon_dm") !== null;
+                room.querySelector(".mx_DecoratedRoomAvatar_icon_dm") !== null;
               const hasHighlight = room.querySelector(".mx_NotificationBadge_highlighted") !== null;
               let kind = "channel";
               if (isDM) {
@@ -621,7 +621,7 @@ async function handleDetectThread() {
       target: { tabId: activeTab.id },
       func: () => {
         const threadPane = document.querySelector('[data-qa="threads_flexpane"]') ||
-                           document.querySelector('.p-threads_flexpane');
+          document.querySelector('.p-threads_flexpane');
         if (!threadPane) return null;
 
         // Extract channel ID from URL path: /client/TEAM/CHANNEL/...
@@ -987,7 +987,7 @@ function sendAutoSummarize(tabId, url) {
       } else {
         tabSummarizeState.set(tabId, "ready");
         // Notify popup if open so it can show the summary
-        browser.runtime.sendMessage({ action: "summary-ready", summary: msg.summary }).catch(() => {});
+        browser.runtime.sendMessage({ action: "summary-ready", summary: msg.summary }).catch(() => { });
       }
       // Only update icon if this tab is still active
       browser.tabs.query({ active: true, currentWindow: true }).then(([active]) => {
